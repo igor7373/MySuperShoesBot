@@ -70,30 +70,41 @@ def create_sizes_keyboard(selected_sizes: list[int]) -> InlineKeyboardMarkup:
 
 async def select_size_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обрабатывает нажатия на кнопки выбора размеров."""
-    query = update.callback_query
-    await query.answer()
-    data = query.data
+    try:
+        query = update.callback_query
+        await query.answer()
+        data = query.data
 
-    selected_sizes = context.user_data.get('selected_sizes', [])
+        print("\n--- Callback handler started ---")
+        print(f"Data received: {data}")
+        selected_sizes = context.user_data.get('selected_sizes', [])
+        print(f"Sizes before operation: {selected_sizes}")
 
-    if data == 'save':
-        if not selected_sizes:
-            await query.answer(text="Пожалуйста, выберите хотя бы один размер.", show_alert=True)
-            return SELECTING_SIZES
-        await query.edit_message_text("Размеры сохранены. Введите цену товара в гривнах.")
-        return ENTERING_PRICE
-    elif data == 'undo':
-        if selected_sizes:
-            selected_sizes.pop()
-    else:
-        selected_sizes.append(int(data))
+        if data == 'save':
+            if not selected_sizes:
+                await query.answer(text="Пожалуйста, выберите хотя бы один размер.", show_alert=True)
+                return SELECTING_SIZES
+            await query.edit_message_text("Размеры сохранены. Введите цену товара в гривнах.")
+            return ENTERING_PRICE
+        elif data == 'undo':
+            if selected_sizes:
+                selected_sizes.pop()
+        else:
+            selected_sizes.append(int(data))
 
-    keyboard = create_sizes_keyboard(selected_sizes)
-    text = "Выбрано: " + ", ".join(map(str, sorted(selected_sizes))) if selected_sizes else "Выберите нужные размеры:"
+        print(f"Sizes after operation: {selected_sizes}")
 
-    await query.edit_message_text(text=text, reply_markup=keyboard)
+        keyboard = create_sizes_keyboard(selected_sizes)
+        text = "Выбрано: " + ", ".join(map(str, sorted(selected_sizes))) if selected_sizes else "Выберите нужные размеры:"
+        
+        print("--- Preparing to edit message ---")
+        await query.edit_message_text(text=text, reply_markup=keyboard)
+        print("--- Message edited successfully, handler finished ---")
 
-    return SELECTING_SIZES
+        return SELECTING_SIZES
+    except Exception as e:
+        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА в select_size_callback: {e}")
+        return SELECTING_SIZES
 
 
 async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -286,40 +297,50 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обрабатывает нажатие на кнопку 'Опубликовать заново'."""
-    query = update.callback_query
-    await query.answer()
+    try:
+        print("\n--- republish_callback started ---")
+        query = update.callback_query
+        await query.answer()
 
-    product_id = int(query.data.split('_')[1])
-    product = get_product_by_id(product_id)
+        product_id = int(query.data.split('_')[1])
+        print(f"Received product_id: {product_id}")
+        product = get_product_by_id(product_id)
 
-    if not product:
-        await query.edit_message_text("Ошибка: товар не найден.")
-        return
+        if not product:
+            await query.edit_message_text("Ошибка: товар не найден.")
+            return
 
-    # Формируем подпись и клавиатуру для поста в канале
-    sizes_str = ", ".join(sorted(product['sizes'].split(',')))
-    caption = (f"Натуральна шкіра\n"
-               f"{sizes_str} розмір\n"
-               f"{product['price']} грн наявність")
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{product_id}")]]
-    )
+        # Формируем подпись и клавиатуру для поста в канале
+        sizes_str = ", ".join(sorted(product['sizes'].split(',')))
+        caption = (f"Натуральна шкіра\n"
+                   f"{sizes_str} розмір\n"
+                   f"{product['price']} грн наявність")
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{product_id}")]]
+        )
 
-    # Отправляем пост в канал, определяя тип медиа
-    file_id = product['file_id']
-    if file_id.startswith("BAAC"):
-        sent_message = await context.bot.send_video(
-            chat_id=CHANNEL_ID, video=file_id, caption=caption, reply_markup=keyboard)
-    else:
-        sent_message = await context.bot.send_photo(
-            chat_id=CHANNEL_ID, photo=file_id, caption=caption, reply_markup=keyboard)
+        # Отправляем пост в канал, определяя тип медиа
+        file_id = product['file_id']
+        print(f"Attempting to send post for product {product_id} to channel...")
+        if file_id.startswith("BAAC"):
+            sent_message = await context.bot.send_video(
+                chat_id=CHANNEL_ID, video=file_id, caption=caption, reply_markup=keyboard)
+        else:
+            sent_message = await context.bot.send_photo(
+                chat_id=CHANNEL_ID, photo=file_id, caption=caption, reply_markup=keyboard)
+        print(f"Post sent successfully. New message_id: {sent_message.message_id}")
 
-    # Обновляем message_id в базе и уведомляем администратора
-    update_message_id(product_id, sent_message.message_id)
+        # Обновляем message_id в базе и уведомляем администратора
+        print(f"Attempting to update message_id for product {product_id} in DB...")
+        update_message_id(product_id, sent_message.message_id)
 
-    await query.message.reply_text(f"Товар ID: {product_id} успешно опубликован повторно.")
-    # Убираем кнопку "Опубликовать заново" из сообщения в каталоге
-    await query.edit_message_reply_markup(reply_markup=None)
+        print("Attempting to send confirmation to admin...")
+        await query.message.reply_text(f"Товар ID: {product_id} успешно опубликован повторно.")
+        # Убираем кнопку "Опубликовать заново" из сообщения в каталоге
+        await query.edit_message_reply_markup(reply_markup=None)
+        print("--- republish_callback finished successfully ---")
+    except Exception as e:
+        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА в republish_callback: {e}")
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
