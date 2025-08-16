@@ -25,7 +25,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             product_id = int(args[0].split('_')[1])
         except (IndexError, ValueError):
-            await update.message.reply_text("Некорректная ссылка для покупки.")
+            await update.message.reply_text("Некоректне посилання для покупки.")
             return
 
         product = get_product_by_id(product_id)
@@ -34,7 +34,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not product or not product['sizes']:
             await context.bot.send_message(
                 chat_id=user_id,
-                text="Извините, этот товар больше не доступен."
+                text="Вибачте, цей товар більше не доступний."
             )
             return
 
@@ -55,19 +55,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup = InlineKeyboardMarkup(keyboard)
         await context.bot.send_message(
             chat_id=user_id,
-            text="Выберите ваш размер:",
+            text="Оберіть ваш розмір:",
             reply_markup=reply_markup
         )
     else:
-        await update.message.reply_text("Привет! Я бот для продажи обуви.")
+        await update.message.reply_text("Привіт! Я бот для продажу взуття.")
 
 
 async def add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает диалог добавления товара и запрашивает фото."""
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Эта команда доступна только администратору.")
+        await update.message.reply_text("Ця команда доступна лише адміністратору.")
         return ConversationHandler.END
-    await update.message.reply_text("Загрузите фотографию товара.")
+    await update.message.reply_text("Завантажте фотографію товару.")
     return PHOTO
 
 
@@ -85,7 +85,7 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data['selected_sizes'] = []
 
     keyboard = create_sizes_keyboard([])
-    await update.message.reply_text("Медиафайл получен. Выберите нужные размеры:",
+    await update.message.reply_text("Медіафайл отримано. Оберіть потрібні розміри:",
                                     reply_markup=keyboard)
     return SELECTING_SIZES
 
@@ -105,8 +105,8 @@ def create_sizes_keyboard(selected_sizes: list[int]) -> InlineKeyboardMarkup:
         keyboard.append(row)
 
     keyboard.append([
-        InlineKeyboardButton("⬅️ Отменить последнее", callback_data='undo'),
-        InlineKeyboardButton("✅ Сохранить", callback_data='save')
+        InlineKeyboardButton("⬅️ Скасувати останнє", callback_data='undo'),
+        InlineKeyboardButton("✅ Зберегти", callback_data='save')
     ])
     return InlineKeyboardMarkup(keyboard)
 
@@ -125,9 +125,9 @@ async def select_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if data == 'save':
             if not selected_sizes:
-                await query.answer(text="Пожалуйста, выберите хотя бы один размер.", show_alert=True)
+                await query.answer(text="Будь ласка, оберіть хоча б один розмір.", show_alert=True)
                 return SELECTING_SIZES
-            await query.edit_message_text("Размеры сохранены. Введите цену товара в гривнах.")
+            await query.edit_message_text("Розміри збережено. Введіть ціну товару у гривнях.")
             return ENTERING_PRICE
         elif data == 'undo':
             if selected_sizes:
@@ -138,7 +138,7 @@ async def select_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         print(f"Sizes after operation: {selected_sizes}")
 
         keyboard = create_sizes_keyboard(selected_sizes)
-        text = "Выбрано: " + ", ".join(map(str, sorted(selected_sizes))) if selected_sizes else "Выберите нужные размеры:"
+        text = "Выбрано: " + ", ".join(map(str, sorted(selected_sizes))) if selected_sizes else "Оберіть потрібні розміри:"
         
         print("--- Preparing to edit message ---")
         await query.edit_message_text(text=text, reply_markup=keyboard)
@@ -154,7 +154,7 @@ async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Обрабатывает цену, публикует товар в канал и завершает диалог."""
     price_text = update.message.text
     if not price_text.isdigit():
-        await update.message.reply_text("Пожалуйста, введите корректную цену в виде числа.")
+        await update.message.reply_text("Будь ласка, введіть коректну ціну у вигляді числа.")
         return ENTERING_PRICE
 
     context.user_data['price'] = int(price_text)
@@ -173,7 +173,7 @@ async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                f"{sizes_str} розмір\n"
                f"{price} грн наявність")
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🛒 Купить", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product_id}")]]
+        [[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product_id}")]]
     )
 
     # Отправляем пост в канал, определяя тип медиа
@@ -189,7 +189,7 @@ async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Сохраняем message_id в базу
     update_message_id(product_id, sent_message.message_id)
 
-    await update.message.reply_text("Товар успешно добавлен и опубликован в канале.")
+    await update.message.reply_text("Товар успішно додано та опубліковано в каналі.")
     return ConversationHandler.END
 
 
@@ -198,20 +198,20 @@ async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     products = get_all_products()
 
     if not products:
-        await update.message.reply_text("Каталог пока пуст.")
+        await update.message.reply_text("Каталог поки що порожній.")
         return
 
     for product in products:
-        caption = f"Цена: {product['price']} грн.\nРазмеры в наличии: {product['sizes']}"
+        caption = f"Ціна: {product['price']} грн.\nРозміри в наявності: {product['sizes']}"
 
         is_admin = update.effective_user.id == ADMIN_ID
         if is_admin:
             keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔁 Опубликовать заново", callback_data=f"repub_{product['id']}")]]
+                [[InlineKeyboardButton("🔁 Опублікувати знову", callback_data=f"repub_{product['id']}")]]
             )
         else:
             keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🛒 Купить", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]]
+                [[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]]
             )
 
         # Отправляем медиа в зависимости от его типа
@@ -233,12 +233,12 @@ async def size_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Извлекаем данные из callback_data (формат: ps_{product_id}_{size})
     _, product_id, selected_size = query.data.split('_')
 
-    text = (f"Вы выбрали размер {selected_size}. Товар будет забронирован для вас на 30 минут "
-            f"после получения реквизитов.\n\nВыберите тип оплаты:")
+    text = (f"Ви обрали розмір {selected_size}. Товар буде заброньовано для вас на 30 хвилин "
+            f"після отримання реквізитів.\n\nОберіть тип оплати:")
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Предоплата", callback_data=f"payment_prepay_{product_id}_{selected_size}")],
-        [InlineKeyboardButton("Полная оплата", callback_data=f"payment_full_{product_id}_{selected_size}")]
+        [InlineKeyboardButton("Передплата", callback_data=f"payment_prepay_{product_id}_{selected_size}")],
+        [InlineKeyboardButton("Повна оплата", callback_data=f"payment_full_{product_id}_{selected_size}")]
     ])
 
     await query.message.reply_text(text, reply_markup=keyboard)
@@ -255,8 +255,8 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Шаг А: Информирование
     await query.message.reply_text(
-        "Реквизиты для оплаты: [Здесь будут ваши реквизиты].\n"
-        "После оплаты отправьте скриншот администратору."
+        "Реквізити для оплати: [Тут будуть ваші реквізити].\n"
+        "Після оплати надішліть скріншот адміністратору."
     )
     # Убираем кнопки после выбора
     await query.edit_message_reply_markup(reply_markup=None)
@@ -280,7 +280,7 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         new_caption = (f"Натуральна шкіра\n"
                        f"{new_sizes_str} розмір\n"
                        f"{product['price']} грн наявність")
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купить", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]])
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]])
         await context.bot.edit_message_caption(
             chat_id=CHANNEL_ID,
             message_id=product['message_id'],
@@ -309,7 +309,7 @@ async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         product = get_product_by_id(product_id)
 
         if not product:
-            await query.edit_message_text("Ошибка: товар не найден.")
+            await query.edit_message_text("Помилка: товар не знайдено.")
             return
 
         # Формируем подпись и клавиатуру для поста в канале
@@ -318,7 +318,7 @@ async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                    f"{sizes_str} розмір\n"
                    f"{product['price']} грн наявність")
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🛒 Купить", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product_id}")]]
+            [[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product_id}")]]
         )
 
         # Отправляем пост в канал, определяя тип медиа
@@ -337,7 +337,7 @@ async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         update_message_id(product_id, sent_message.message_id)
 
         print("Attempting to send confirmation to admin...")
-        await query.message.reply_text(f"Товар ID: {product_id} успешно опубликован повторно.")
+        await query.message.reply_text(f"Товар ID: {product_id} успішно опубліковано повторно.")
         # Убираем кнопку "Опубликовать заново" из сообщения в каталоге
         await query.edit_message_reply_markup(reply_markup=None)
         print("--- republish_callback finished successfully ---")
@@ -348,20 +348,20 @@ async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def show_delete_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Выводит список товаров для удаления."""
     if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("Эта команда доступна только администратору.")
+        await update.message.reply_text("Ця команда доступна лише адміністратору.")
         return
 
     products = get_all_products()
 
     if not products:
-        await update.message.reply_text("В каталоге нет товаров для удаления.")
+        await update.message.reply_text("У каталозі немає товарів для видалення.")
         return
 
-    await update.message.reply_text("Выберите товар, который хотите удалить:")
+    await update.message.reply_text("Оберіть товар, який хочете видалити:")
     for product in products:
-        caption = f"ID: {product['id']}\nЦена: {product['price']} грн.\nРазмеры: {product['sizes']}"
+        caption = f"ID: {product['id']}\nЦіна: {product['price']} грн.\nРозміри: {product['sizes']}"
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("❌ Удалить этот товар", callback_data=f"del_{product['id']}")]]
+            [[InlineKeyboardButton("❌ Видалити цей товар", callback_data=f"del_{product['id']}")]]
         )
 
         if product['file_id'].startswith("BAAC"):
@@ -383,13 +383,13 @@ async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     keyboard = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_del_{product_id}"),
-            InlineKeyboardButton("❌ Нет, отмена", callback_data="cancel_del")
+            InlineKeyboardButton("✅ Так, видалити", callback_data=f"confirm_del_{product_id}"),
+            InlineKeyboardButton("❌ Ні, скасувати", callback_data="cancel_del")
         ]
     ])
     await query.edit_message_reply_markup(reply_markup=None)
     await query.message.reply_text(
-        f"Вы уверены, что хотите удалить товар ID: {product_id}?",
+        f"Ви впевнені, що хочете видалити товар ID: {product_id}?",
         reply_markup=keyboard
     )
 
@@ -409,19 +409,19 @@ async def confirm_delete_callback(update: Update, context: ContextTypes.DEFAULT_
             print(f"Не удалось удалить сообщение {product['message_id']} из канала: {e}")
 
     delete_product_by_id(product_id)
-    await query.edit_message_text("Товар успешно удален.")
+    await query.edit_message_text("Товар успішно видалено.")
 
 
 async def cancel_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Отменяет процесс удаления товара, редактируя сообщение."""
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("Удаление отменено.")
+    await query.edit_message_text("Видалення скасовано.")
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отменяет текущий диалог."""
-    await update.message.reply_text("Действие отменено.")
+    await update.message.reply_text("Дію скасовано.")
     return ConversationHandler.END
 
 
