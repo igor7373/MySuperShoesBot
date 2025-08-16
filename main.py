@@ -5,7 +5,10 @@ from telegram.ext import (Application, CommandHandler, ContextTypes,
                           ConversationHandler, MessageHandler, filters,
                           CallbackQueryHandler)
 
-from config import ADMIN_ID, TELEGRAM_BOT_TOKEN
+from config import ADMIN_ID, CHANNEL_ID, TELEGRAM_BOT_TOKEN
+from database import (add_product, get_all_products, get_product_by_id, init_db,
+                      set_product_sold, update_message_id,
+                      update_product_sizes)
 
 # Определяем состояния для диалога
 PHOTO, SELECTING_SIZES, ENTERING_PRICE = range(3)
@@ -105,7 +108,7 @@ async def select_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обрабатывает введенную цену и завершает диалог."""
+    """Обрабатывает цену, публикует товар в канал и завершает диалог."""
     price_text = update.message.text
     if not price_text.isdigit():
         await update.message.reply_text("Пожалуйста, введите корректную цену в виде числа.")
@@ -113,16 +116,176 @@ async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     context.user_data['price'] = int(price_text)
 
-    # Собираем все данные для итогового сообщения
-    photo_id = context.user_data['photo_id']
+    # Собираем данные
+    file_id = context.user_data['photo_id']
     selected_sizes = context.user_data['selected_sizes']
     price = context.user_data['price']
 
-    await update.message.reply_text(
-        f"Товар добавлен! ID фото/видео: {photo_id}, "
-        f"Размеры: {sorted(selected_sizes)}, Цена: {price} грн."
+    # Добавляем товар в базу и получаем его ID
+    product_id = add_product(file_id=file_id, price=price, sizes=selected_sizes)
+
+    # Готовим пост для канала
+    sizes_str = ", ".join(map(str, sorted(selected_sizes)))
+    caption = (f"Натуральна шкіра\n"
+               f"{sizes_str} розмір\n"
+               f"{price} грн наявність")
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{product_id}")]]
     )
+
+    # Отправляем пост в канал, определяя тип медиа
+    if file_id.startswith("BAAC"):  # Примерный префикс для видео
+        sent_message = await context.bot.send_video(
+            chat_id=CHANNEL_ID, video=file_id, caption=caption, reply_markup=keyboard
+        )
+    else:
+        sent_message = await context.bot.send_photo(
+            chat_id=CHANNEL_ID, photo=file_id, caption=caption, reply_markup=keyboard
+        )
+
+    # Сохраняем message_id в базу
+    update_message_id(product_id, sent_message.message_id)
+
+    await update.message.reply_text("Товар успешно добавлен и опубликован в канале.")
     return ConversationHandler.END
+
+
+async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Выводит каталог товаров, доступных для покупки."""
+    products = get_all_products()
+
+    if not products:
+        await update.message.reply_text("Каталог пока пуст.")
+        return
+
+    for product in products:
+        caption = f"Цена: {product['price']} грн.\nРазмеры в наличии: {product['sizes']}"
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{product['id']}")]]
+        )
+        # Используем reply_photo, так как это самый частый случай.
+        # В будущем можно будет сохранять тип медиа для корректного
+        # вызова send_photo/send_video.
+        sent_message = await update.message.reply_photo(
+            photo=product['file_id'],
+            caption=caption,
+            reply_markup=keyboard
+        )
+        # Сохраняем message_id в базу данных
+        update_message_id(product['id'], sent_message.message_id)
+
+
+async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает нажатие на кнопку 'Купить' и предлагает выбрать размер."""
+    query = update.callback_query
+    await query.answer()
+
+    # Извлекаем ID товара из callback_data (формат: buy_{id})
+    product_id = int(query.data.split('_')[1])
+
+    product = get_product_by_id(product_id)
+
+    if not product:
+        await context.bot.send_message(
+            chat_id=query.from_user.id,
+            text="Извините, этот товар больше не доступен."
+        )
+        return
+
+    # Отправляем фото/видео товара в личный чат
+    file_id = product['file_id']
+    if file_id.startswith("BAAC"):
+        await context.bot.send_video(chat_id=query.from_user.id, video=file_id)
+    else:
+        await context.bot.send_photo(chat_id=query.from_user.id, photo=file_id)
+
+    # Преобразуем строку с размерами в список
+    available_sizes = product['sizes'].split(',')
+
+    # Создаем клавиатуру с доступными размерами
+    keyboard_buttons = [
+        InlineKeyboardButton(size, callback_data=f"ps_{product['id']}_{size}")
+        for size in available_sizes
+    ]
+    keyboard = [keyboard_buttons[i:i + 5] for i in range(0, len(keyboard_buttons), 5)]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await context.bot.send_message(
+        chat_id=query.from_user.id,
+        text="Выберите ваш размер:",
+        reply_markup=reply_markup
+    )
+
+
+async def size_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает выбор размера и предлагает варианты оплаты."""
+    query = update.callback_query
+    await query.answer()
+
+    # Извлекаем данные из callback_data (формат: ps_{product_id}_{size})
+    _, product_id, selected_size = query.data.split('_')
+
+    text = (f"Вы выбрали размер {selected_size}. Товар будет забронирован для вас на 30 минут "
+            f"после получения реквизитов.\n\nВыберите тип оплаты:")
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Предоплата", callback_data=f"payment_prepay_{product_id}_{selected_size}")],
+        [InlineKeyboardButton("Полная оплата", callback_data=f"payment_full_{product_id}_{selected_size}")]
+    ])
+
+    await query.message.reply_text(text, reply_markup=keyboard)
+
+
+async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает выбор типа оплаты, бронирует товар и обновляет каталог."""
+    query = update.callback_query
+    await query.answer()
+
+    # Извлекаем данные (формат: payment_{type}_{product_id}_{size})
+    _, payment_type, product_id, selected_size = query.data.split('_')
+    product_id = int(product_id)
+
+    # Шаг А: Информирование
+    await query.message.reply_text(
+        "Реквизиты для оплаты: [Здесь будут ваши реквизиты].\n"
+        "После оплаты отправьте скриншот администратору."
+    )
+    # Убираем кнопки после выбора
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    # Шаг Б: Получение данных о товаре
+    product = get_product_by_id(product_id)
+    if not product or not product['message_id']:
+        print(f"Ошибка: не найден товар {product_id} или message_id для обновления каталога.")
+        return
+
+    # Шаг В: Обновление базы данных
+    current_sizes = product['sizes'].split(',')
+    if selected_size in current_sizes:
+        current_sizes.remove(selected_size)
+
+    new_sizes_str = ",".join(sorted(current_sizes, key=int))
+    update_product_sizes(product_id, new_sizes_str)
+
+    # Шаг Г: Обновление каталога
+    if new_sizes_str:
+        new_caption = (f"Натуральна шкіра\n"
+                       f"{new_sizes_str} розмір\n"
+                       f"{product['price']} грн наявність")
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{product['id']}")]])
+        await context.bot.edit_message_caption(
+            chat_id=CHANNEL_ID,
+            message_id=product['message_id'],
+            caption=new_caption, reply_markup=keyboard
+        )
+    else:  # Все размеры проданы
+        new_caption = (f"Натуральна шкіра\n"
+                       f"ПРОДАНО\n"
+                       f"{product['price']} грн наявність")
+        await context.bot.edit_message_caption(
+            chat_id=CHANNEL_ID,
+            message_id=product['message_id'],
+            caption=new_caption, reply_markup=None
+        )
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -133,6 +296,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 def main() -> None:
     """Основная функция для запуска бота."""
+    init_db()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
@@ -147,6 +311,10 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
+    application.add_handler(CommandHandler("catalog", show_catalog))
+    application.add_handler(CallbackQueryHandler(buy_callback, pattern='^buy_'))
+    application.add_handler(CallbackQueryHandler(size_callback, pattern='^ps_'))
+    application.add_handler(CallbackQueryHandler(payment_callback, pattern='^payment_'))
 
     application.run_polling()
 
