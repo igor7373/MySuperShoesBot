@@ -26,15 +26,21 @@ async def add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обрабатывает полученное фото и предлагает выбрать размеры."""
-    photo_file = update.message.photo[-1]
-    context.user_data['photo_id'] = photo_file.file_id
+    """Обрабатывает полученное фото/видео/документ и предлагает выбрать размеры."""
+    file_id = None
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+    elif update.message.video:
+        file_id = update.message.video.file_id
+    elif update.message.document:
+        file_id = update.message.document.file_id
+
+    context.user_data['photo_id'] = file_id
     context.user_data['selected_sizes'] = []
 
     keyboard = create_sizes_keyboard([])
-    await update.message.reply_text(
-        "Фото получено. Выберите нужные размеры:", reply_markup=keyboard
-    )
+    await update.message.reply_text("Медиафайл получен. Выберите нужные размеры:",
+                                    reply_markup=keyboard)
     return SELECTING_SIZES
 
 
@@ -98,6 +104,27 @@ async def select_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return SELECTING_SIZES
 
 
+async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает введенную цену и завершает диалог."""
+    price_text = update.message.text
+    if not price_text.isdigit():
+        await update.message.reply_text("Пожалуйста, введите корректную цену в виде числа.")
+        return ENTERING_PRICE
+
+    context.user_data['price'] = int(price_text)
+
+    # Собираем все данные для итогового сообщения
+    photo_id = context.user_data['photo_id']
+    selected_sizes = context.user_data['selected_sizes']
+    price = context.user_data['price']
+
+    await update.message.reply_text(
+        f"Товар добавлен! ID фото/видео: {photo_id}, "
+        f"Размеры: {sorted(selected_sizes)}, Цена: {price} грн."
+    )
+    return ConversationHandler.END
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отменяет текущий диалог."""
     await update.message.reply_text("Действие отменено.")
@@ -111,8 +138,9 @@ def main() -> None:
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('addproduct', add_product_start)],
         states={
-            PHOTO: [MessageHandler(filters.PHOTO, photo_received)],
+            PHOTO: [MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.IMAGE, photo_received)],
             SELECTING_SIZES: [CallbackQueryHandler(select_size_callback)],
+            ENTERING_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_received)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
