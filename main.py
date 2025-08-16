@@ -160,19 +160,26 @@ async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     for product in products:
         caption = f"Цена: {product['price']} грн.\nРазмеры в наличии: {product['sizes']}"
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{product['id']}")]]
-        )
-        # Используем reply_photo, так как это самый частый случай.
-        # В будущем можно будет сохранять тип медиа для корректного
-        # вызова send_photo/send_video.
-        sent_message = await update.message.reply_photo(
-            photo=product['file_id'],
-            caption=caption,
-            reply_markup=keyboard
-        )
-        # Сохраняем message_id в базу данных
-        update_message_id(product['id'], sent_message.message_id)
+
+        is_admin = update.effective_user.id == ADMIN_ID
+        if is_admin:
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔁 Опубликовать заново", callback_data=f"repub_{product['id']}")]]
+            )
+        else:
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{product['id']}")]]
+            )
+
+        # Отправляем медиа в зависимости от его типа
+        if product['file_id'].startswith("BAAC"):
+            await update.message.reply_video(
+                video=product['file_id'], caption=caption, reply_markup=keyboard
+            )
+        else:
+            await update.message.reply_photo(
+                photo=product['file_id'], caption=caption, reply_markup=keyboard
+            )
 
 
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -288,6 +295,54 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
 
+async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает нажатие на кнопку 'Опубликовать заново'."""
+    try:
+        print("\n--- republish_callback started ---")
+        query = update.callback_query
+        await query.answer()
+
+        product_id = int(query.data.split('_')[1])
+        print(f"Received product_id: {product_id}")
+        product = get_product_by_id(product_id)
+
+        if not product:
+            await query.edit_message_text("Ошибка: товар не найден.")
+            return
+
+        # Формируем подпись и клавиатуру для поста в канале
+        sizes_str = ", ".join(sorted(product['sizes'].split(',')))
+        caption = (f"Натуральна шкіра\n"
+                   f"{sizes_str} розмір\n"
+                   f"{product['price']} грн наявність")
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{product_id}")]]
+        )
+
+        # Отправляем пост в канал, определяя тип медиа
+        file_id = product['file_id']
+        print(f"Attempting to send post for product {product_id} to channel...")
+        if file_id.startswith("BAAC"):
+            sent_message = await context.bot.send_video(
+                chat_id=CHANNEL_ID, video=file_id, caption=caption, reply_markup=keyboard)
+        else:
+            sent_message = await context.bot.send_photo(
+                chat_id=CHANNEL_ID, photo=file_id, caption=caption, reply_markup=keyboard)
+        print(f"Post sent successfully. New message_id: {sent_message.message_id}")
+
+        # Обновляем message_id в базе и уведомляем администратора
+        print(f"Attempting to update message_id for product {product_id} in DB...")
+        update_message_id(product_id, sent_message.message_id)
+
+        print("Attempting to send confirmation to admin...")
+        await query.message.reply_text(f"Товар ID: {product_id} успешно опубликован повторно.")
+        # Убираем кнопку "Опубликовать заново" из сообщения в каталоге
+        await query.edit_message_reply_markup(reply_markup=None)
+        print("--- republish_callback finished successfully ---")
+    except Exception as e:
+        print(f"!!! КРИТИЧЕСКАЯ ОШИБКА в republish_callback: {e}")
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отменяет текущий диалог."""
     await update.message.reply_text("Действие отменено.")
@@ -313,6 +368,7 @@ def main() -> None:
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("catalog", show_catalog))
     application.add_handler(CallbackQueryHandler(buy_callback, pattern='^buy_'))
+    application.add_handler(CallbackQueryHandler(republish_callback, pattern='^repub_'))
     application.add_handler(CallbackQueryHandler(size_callback, pattern='^ps_'))
     application.add_handler(CallbackQueryHandler(payment_callback, pattern='^payment_'))
 
