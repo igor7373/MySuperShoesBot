@@ -5,7 +5,7 @@ from telegram.ext import (Application, CommandHandler, ContextTypes,
                           ConversationHandler, MessageHandler, filters,
                           CallbackQueryHandler)
 
-from config import ADMIN_ID, CHANNEL_ID, TELEGRAM_BOT_TOKEN
+from config import ADMIN_ID, CHANNEL_ID, TELEGRAM_BOT_TOKEN, BOT_USERNAME
 from database import (add_product, get_all_products, get_product_by_id, init_db,
                       set_product_sold, update_message_id, update_product_sizes,
                       delete_product_by_id)
@@ -15,8 +15,51 @@ PHOTO, SELECTING_SIZES, ENTERING_PRICE = range(3)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Отправляет приветственное сообщение в ответ на команду /start."""
-    await update.message.reply_text("Привет! Я бот для продажи обуви.")
+    """
+    Обрабатывает команду /start.
+    Если команда вызвана с параметром (deep link), запускает процесс покупки.
+    Иначе, отправляет приветственное сообщение.
+    """
+    args = context.args
+    if args and args[0].startswith('buy_'):
+        try:
+            product_id = int(args[0].split('_')[1])
+        except (IndexError, ValueError):
+            await update.message.reply_text("Некорректная ссылка для покупки.")
+            return
+
+        product = get_product_by_id(product_id)
+        user_id = update.effective_user.id
+
+        if not product or not product['sizes']:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="Извините, этот товар больше не доступен."
+            )
+            return
+
+        # Отправляем фото/видео товара в личный чат
+        file_id = product['file_id']
+        if file_id.startswith("BAAC"):
+            await context.bot.send_video(chat_id=user_id, video=file_id)
+        else:
+            await context.bot.send_photo(chat_id=user_id, photo=file_id)
+
+        # Создаем клавиатуру с доступными размерами
+        available_sizes = product['sizes'].split(',')
+        keyboard_buttons = [
+            InlineKeyboardButton(size, callback_data=f"ps_{product['id']}_{size}")
+            for size in available_sizes
+        ]
+        keyboard = [keyboard_buttons[i:i + 5] for i in range(0, len(keyboard_buttons), 5)]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="Выберите ваш размер:",
+            reply_markup=reply_markup
+        )
+    else:
+        await update.message.reply_text("Привет! Я бот для продажи обуви.")
 
 
 async def add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -130,7 +173,7 @@ async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                f"{sizes_str} розмір\n"
                f"{price} грн наявність")
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{product_id}")]]
+        [[InlineKeyboardButton("🛒 Купить", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product_id}")]]
     )
 
     # Отправляем пост в канал, определяя тип медиа
@@ -168,7 +211,7 @@ async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
         else:
             keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{product['id']}")]]
+                [[InlineKeyboardButton("🛒 Купить", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]]
             )
 
         # Отправляем медиа в зависимости от его типа
@@ -180,47 +223,6 @@ async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await update.message.reply_photo(
                 photo=product['file_id'], caption=caption, reply_markup=keyboard
             )
-
-
-async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает нажатие на кнопку 'Купить' и предлагает выбрать размер."""
-    query = update.callback_query
-    await query.answer()
-
-    # Извлекаем ID товара из callback_data (формат: buy_{id})
-    product_id = int(query.data.split('_')[1])
-
-    product = get_product_by_id(product_id)
-
-    if not product:
-        await context.bot.send_message(
-            chat_id=query.from_user.id,
-            text="Извините, этот товар больше не доступен."
-        )
-        return
-
-    # Отправляем фото/видео товара в личный чат
-    file_id = product['file_id']
-    if file_id.startswith("BAAC"):
-        await context.bot.send_video(chat_id=query.from_user.id, video=file_id)
-    else:
-        await context.bot.send_photo(chat_id=query.from_user.id, photo=file_id)
-
-    # Преобразуем строку с размерами в список
-    available_sizes = product['sizes'].split(',')
-
-    # Создаем клавиатуру с доступными размерами
-    keyboard_buttons = [
-        InlineKeyboardButton(size, callback_data=f"ps_{product['id']}_{size}")
-        for size in available_sizes
-    ]
-    keyboard = [keyboard_buttons[i:i + 5] for i in range(0, len(keyboard_buttons), 5)]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(
-        chat_id=query.from_user.id,
-        text="Выберите ваш размер:",
-        reply_markup=reply_markup
-    )
 
 
 async def size_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -278,7 +280,7 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         new_caption = (f"Натуральна шкіра\n"
                        f"{new_sizes_str} розмір\n"
                        f"{product['price']} грн наявність")
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{product['id']}")]])
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купить", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]])
         await context.bot.edit_message_caption(
             chat_id=CHANNEL_ID,
             message_id=product['message_id'],
@@ -316,7 +318,7 @@ async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                    f"{sizes_str} розмір\n"
                    f"{product['price']} грн наявність")
         keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🛒 Купить", callback_data=f"buy_{product_id}")]]
+            [[InlineKeyboardButton("🛒 Купить", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product_id}")]]
         )
 
         # Отправляем пост в канал, определяя тип медиа
@@ -441,7 +443,6 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("catalog", show_catalog))
-    application.add_handler(CallbackQueryHandler(buy_callback, pattern='^buy_'))
     application.add_handler(CommandHandler("delete", show_delete_list))
     application.add_handler(CallbackQueryHandler(delete_callback, pattern='^del_'))
     application.add_handler(CallbackQueryHandler(confirm_delete_callback, pattern='^confirm_del_'))
