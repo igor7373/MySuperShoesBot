@@ -7,8 +7,8 @@ from telegram.ext import (Application, CommandHandler, ContextTypes,
 
 from config import ADMIN_ID, CHANNEL_ID, TELEGRAM_BOT_TOKEN
 from database import (add_product, get_all_products, get_product_by_id, init_db,
-                      set_product_sold, update_message_id,
-                      update_product_sizes)
+                      set_product_sold, update_message_id, update_product_sizes,
+                      delete_product_by_id)
 
 # Определяем состояния для диалога
 PHOTO, SELECTING_SIZES, ENTERING_PRICE = range(3)
@@ -343,6 +343,80 @@ async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         print(f"!!! КРИТИЧЕСКАЯ ОШИБКА в republish_callback: {e}")
 
 
+async def show_delete_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Выводит список товаров для удаления."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Эта команда доступна только администратору.")
+        return
+
+    products = get_all_products()
+
+    if not products:
+        await update.message.reply_text("В каталоге нет товаров для удаления.")
+        return
+
+    await update.message.reply_text("Выберите товар, который хотите удалить:")
+    for product in products:
+        caption = f"ID: {product['id']}\nЦена: {product['price']} грн.\nРазмеры: {product['sizes']}"
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("❌ Удалить этот товар", callback_data=f"del_{product['id']}")]]
+        )
+
+        if product['file_id'].startswith("BAAC"):
+            await update.message.reply_video(
+                video=product['file_id'], caption=caption, reply_markup=keyboard
+            )
+        else:
+            await update.message.reply_photo(
+                photo=product['file_id'], caption=caption, reply_markup=keyboard
+            )
+
+
+async def delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Запрашивает подтверждение на удаление товара."""
+    query = update.callback_query
+    await query.answer()
+
+    product_id = int(query.data.split('_')[1])
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_del_{product_id}"),
+            InlineKeyboardButton("❌ Нет, отмена", callback_data="cancel_del")
+        ]
+    ])
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        f"Вы уверены, что хотите удалить товар ID: {product_id}?",
+        reply_markup=keyboard
+    )
+
+
+async def confirm_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Окончательно удаляет товар из БД и канала."""
+    query = update.callback_query
+    await query.answer()
+
+    product_id = int(query.data.split('_')[2])
+    product = get_product_by_id(product_id)
+
+    if product and product['message_id']:
+        try:
+            await context.bot.delete_message(chat_id=CHANNEL_ID, message_id=product['message_id'])
+        except Exception as e:
+            print(f"Не удалось удалить сообщение {product['message_id']} из канала: {e}")
+
+    delete_product_by_id(product_id)
+    await query.edit_message_text("Товар успешно удален.")
+
+
+async def cancel_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отменяет процесс удаления товара, редактируя сообщение."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Удаление отменено.")
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отменяет текущий диалог."""
     await update.message.reply_text("Действие отменено.")
@@ -368,6 +442,10 @@ def main() -> None:
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("catalog", show_catalog))
     application.add_handler(CallbackQueryHandler(buy_callback, pattern='^buy_'))
+    application.add_handler(CommandHandler("delete", show_delete_list))
+    application.add_handler(CallbackQueryHandler(delete_callback, pattern='^del_'))
+    application.add_handler(CallbackQueryHandler(confirm_delete_callback, pattern='^confirm_del_'))
+    application.add_handler(CallbackQueryHandler(cancel_delete_callback, pattern='^cancel_del$'))
     application.add_handler(CallbackQueryHandler(republish_callback, pattern='^repub_'))
     application.add_handler(CallbackQueryHandler(size_callback, pattern='^ps_'))
     application.add_handler(CallbackQueryHandler(payment_callback, pattern='^payment_'))

@@ -99,3 +99,14 @@ def set_product_sold(product_id: int):
     cursor.execute("UPDATE products SET is_sold = 1 WHERE id = ?", (product_id,))
     conn.commit()
     conn.close()
+
+
+def delete_product_by_id(product_id: int):
+    """
+    Удаляет товар из базы данных по его ID.
+    """
+    conn = sqlite3.connect('shop.db')
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM products WHERE id = ?", (product_id,))
+    conn.commit()
+    conn.close()
