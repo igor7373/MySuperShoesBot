@@ -12,7 +12,7 @@ from database import (add_product, get_all_products, get_product_by_id, init_db,
                       delete_product_by_id)
 
 # Определяем состояния для диалога
-PHOTO, SELECTING_SIZES, ENTERING_PRICE, AWAITING_PROOF, AWAITING_NAME, AWAITING_PHONE, AWAITING_CITY, AWAITING_POST_OFFICE = range(8)
+PHOTO, SELECTING_SIZES, ENTERING_PRICE, AWAITING_PROOF, AWAITING_NAME, AWAITING_PHONE, AWAITING_CITY, AWAITING_DELIVERY_CHOICE, AWAITING_NP_DETAILS, AWAITING_UP_DETAILS = range(10)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -260,7 +260,6 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Шаг 1: Получаем товар и визуально убираем размер из поста в канале
     product = get_product_by_id(product_id)
-    print(f"DEBUG INFO: Пытаюсь обработать заказ для продукта: {product}")
     if not product or not product['message_id']:
         await query.message.reply_text("Вибачте, сталася помилка з товаром. Спробуйте пізніше.")
         return ConversationHandler.END
@@ -408,18 +407,39 @@ async def phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def city_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Сохраняет город и запрашивает отделение Новой Почты."""
+    """Сохраняет город и предлагает выбрать способ доставки."""
     context.user_data['city'] = update.message.text
-    await update.message.reply_text("Введіть номер відділення Нової Пошти.")
-    return AWAITING_POST_OFFICE
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Нова Пошта", callback_data='delivery_np')],
+        [InlineKeyboardButton("Укрпошта", callback_data='delivery_up')]
+    ])
+    await update.message.reply_text("Оберіть спосіб доставки:", reply_markup=keyboard)
+    return AWAITING_DELIVERY_CHOICE
 
 
-async def post_office_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def delivery_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает выбор способа доставки."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == 'delivery_np':
+        context.user_data['delivery_method'] = 'Нова Пошта'
+        await query.edit_message_text("Введіть номер відділення або поштомату Нової Пошти.")
+        return AWAITING_NP_DETAILS
+    elif data == 'delivery_up':
+        context.user_data['delivery_method'] = 'Укрпошта'
+        await query.edit_message_text("Введіть Ваш поштовий індекс.")
+        return AWAITING_UP_DETAILS
+
+
+async def delivery_details_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Сохраняет отделение, собирает все данные, отправляет заказ менеджеру
+    Сохраняет детали доставки, собирает все данные, отправляет заказ менеджеру
     и завершает диалог.
     """
-    context.user_data['post_office'] = update.message.text
+    # Сохраняем последнюю деталь (номер отделения или индекс)
+    context.user_data['delivery_final_detail'] = update.message.text
     user_id = update.effective_user.id
 
     # 1. Собрать все данные
@@ -430,7 +450,8 @@ async def post_office_received(update: Update, context: ContextTypes.DEFAULT_TYP
     full_name = user_data.get('full_name')
     phone_number = user_data.get('phone_number')
     city = user_data.get('city')
-    post_office = user_data.get('post_office')
+    delivery_method = user_data.get('delivery_method')
+    delivery_final_detail = user_data.get('delivery_final_detail')
 
     product = get_product_by_id(product_id)
     if not product:
@@ -451,8 +472,11 @@ async def post_office_received(update: Update, context: ContextTypes.DEFAULT_TYP
         f"<b>ПІБ:</b> {full_name}\n"
         f"<b>Телефон:</b> {phone_number}\n"
         f"<b>Місто:</b> {city}\n"
-        f"<b>Відділення НП:</b> {post_office}"
     )
+    if delivery_method == 'Нова Пошта':
+        order_details += f"<b>Відділення/Поштомат НП:</b> {delivery_final_detail}"
+    else:
+        order_details += f"<b>Індекс Укрпошти:</b> {delivery_final_detail}"
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Підтвердити замовлення", callback_data=f"confirm_{product_id}_{selected_size}_{user_id}")]
@@ -671,7 +695,9 @@ def main() -> None:
             AWAITING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_received)],
             AWAITING_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, phone_received)],
             AWAITING_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, city_received)],
-            AWAITING_POST_OFFICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, post_office_received)],
+            AWAITING_DELIVERY_CHOICE: [CallbackQueryHandler(delivery_choice_callback)],
+            AWAITING_NP_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, delivery_details_received)],
+            AWAITING_UP_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, delivery_details_received)],
         },
         fallbacks=[],
     )
