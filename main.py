@@ -1,5 +1,6 @@
 import asyncio
 
+from apscheduler.jobstores.base import JobLookupError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (Application, CommandHandler, ContextTypes,
                           ConversationHandler, JobQueue, MessageHandler,
@@ -414,17 +415,111 @@ async def city_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 
 async def post_office_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Сохраняет отделение, завершает сбор данных и диалог."""
+    """
+    Сохраняет отделение, собирает все данные, отправляет заказ менеджеру
+    и завершает диалог.
+    """
     context.user_data['post_office'] = update.message.text
+    user_id = update.effective_user.id
 
-    # На этом этапе все данные собраны.
-    # Логика отправки менеджеру будет на следующем шаге.
+    # 1. Собрать все данные
+    user_data = context.user_data
+    product_id = user_data.get('product_id')
+    selected_size = user_data.get('selected_size')
+    proof_file_id = user_data.get('proof_file_id')
+    full_name = user_data.get('full_name')
+    phone_number = user_data.get('phone_number')
+    city = user_data.get('city')
+    post_office = user_data.get('post_office')
+
+    product = get_product_by_id(product_id)
+    if not product:
+        await update.message.reply_text(
+            "Вибачте, сталася помилка з вашим замовленням. "
+            "Будь ласка, зв'яжіться з менеджером напряму."
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    # 2. Сформировать "карточку заказа" для менеджера
+    order_details = (
+        f"🚨 <b>НОВЕ ЗАМОВЛЕННЯ</b> 🚨\n\n"
+        f"<b>Товар ID:</b> {product_id}\n"
+        f"<b>Обраний розмір:</b> {selected_size}\n"
+        f"<b>Ціна:</b> {product['price']} грн\n\n"
+        f"👤 <b>Клієнт:</b>\n"
+        f"<b>ПІБ:</b> {full_name}\n"
+        f"<b>Телефон:</b> {phone_number}\n"
+        f"<b>Місто:</b> {city}\n"
+        f"<b>Відділення НП:</b> {post_office}"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Підтвердити замовлення", callback_data=f"confirm_{product_id}_{selected_size}_{user_id}")]
+    ])
+
+    # 3. Отправить заказ менеджеру
+    product_file_id = product['file_id']
+    if product_file_id.startswith("BAAC"):
+        await context.bot.send_video(chat_id=ADMIN_ID, video=product_file_id)
+    else:
+        await context.bot.send_photo(chat_id=ADMIN_ID, photo=product_file_id)
+
+    await context.bot.send_photo(chat_id=ADMIN_ID, photo=proof_file_id, caption="Підтвердження оплати від клієнта")
+    await context.bot.send_message(chat_id=ADMIN_ID, text=order_details, reply_markup=keyboard, parse_mode='HTML')
+
     await update.message.reply_text(
         "Дякуємо! Всі дані отримано. Ваше замовлення передається менеджеру на перевірку."
     )
-
+    context.user_data.clear()
     return ConversationHandler.END
 
+
+async def confirm_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Обрабатывает подтверждение заказа менеджером: удаляет размер из БД,
+    уведомляет клиента и обновляет сообщение для менеджера.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    # 1. Извлечь данные
+    try:
+        _, product_id_str, selected_size, user_id_str = query.data.split('_')
+        product_id = int(product_id_str)
+        user_id = int(user_id_str)
+    except (ValueError, IndexError) as e:
+        print(f"Ошибка разбора callback_data в confirm_order_callback: {e}")
+        await query.edit_message_text("Помилка: Некоректні дані в кнопці.")
+        return
+
+    # 2. Удалить размер из БД
+    product = get_product_by_id(product_id)
+    if not product:
+        await query.edit_message_text(f"Помилка: Товар ID {product_id} не знайдено.")
+        return
+
+    current_sizes = product['sizes'].split(',')
+    if selected_size in current_sizes:
+        current_sizes.remove(selected_size)
+        new_sizes_str = ",".join(sorted(current_sizes, key=int))
+        update_product_sizes(product_id, new_sizes_str)
+    else:
+        await query.answer("Цей розмір вже було продано або замовлення вже підтверджено.", show_alert=True)
+        return
+
+    # 3. Уведомить клиента
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="Ваше замовлення прийнято в обробку. Як тільки посилку буде відправлено, ми повідомимо вам номер ТТН."
+        )
+    except Exception as e:
+        print(f"Не удалось отправить уведомление клиенту {user_id}: {e}")
+
+    # 4. Обновить сообщение для менеджера
+    new_text = query.message.text + "\n\n<b>✅ ЗАМОВЛЕННЯ ПІДТВЕРДЖЕНО</b>"
+    await query.edit_message_text(text=new_text, reply_markup=None, parse_mode='HTML')
 
 async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обрабатывает нажатие на кнопку 'Опубликовать заново'."""
@@ -578,7 +673,7 @@ def main() -> None:
             AWAITING_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, city_received)],
             AWAITING_POST_OFFICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, post_office_received)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)],
+        fallbacks=[],
     )
 
     application.add_handler(CommandHandler("start", start))
@@ -591,6 +686,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(cancel_delete_callback, pattern='^cancel_del$'))
     application.add_handler(CallbackQueryHandler(republish_callback, pattern='^repub_'))
     application.add_handler(CallbackQueryHandler(size_callback, pattern='^ps_'))
+    application.add_handler(CallbackQueryHandler(confirm_order_callback, pattern='^confirm_'))
 
     application.run_polling()
 
