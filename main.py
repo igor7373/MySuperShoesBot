@@ -2,8 +2,8 @@ import asyncio
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (Application, CommandHandler, ContextTypes,
-                          ConversationHandler, MessageHandler, filters,
-                          CallbackQueryHandler)
+                          ConversationHandler, JobQueue, MessageHandler,
+                          filters, CallbackQueryHandler)
 
 from config import ADMIN_ID, CHANNEL_ID, TELEGRAM_BOT_TOKEN, BOT_USERNAME
 from database import (add_product, get_all_products, get_product_by_id, init_db,
@@ -11,7 +11,7 @@ from database import (add_product, get_all_products, get_product_by_id, init_db,
                       delete_product_by_id)
 
 # Определяем состояния для диалога
-PHOTO, SELECTING_SIZES, ENTERING_PRICE = range(3)
+PHOTO, SELECTING_SIZES, ENTERING_PRICE, AWAITING_PROOF, AWAITING_NAME, AWAITING_PHONE, AWAITING_CITY, AWAITING_POST_OFFICE = range(8)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -244,57 +244,186 @@ async def size_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await query.message.reply_text(text, reply_markup=keyboard)
 
 
-async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает выбор типа оплаты, бронирует товар и обновляет каталог."""
+async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Начинает гибридный процесс бронирования: визуально убирает размер из канала,
+    запускает таймер, но НЕ изменяет базу данных.
+    """
     query = update.callback_query
     await query.answer()
 
+    user_id = update.effective_user.id
     # Извлекаем данные (формат: payment_{type}_{product_id}_{size})
-    _, payment_type, product_id, selected_size = query.data.split('_')
-    product_id = int(product_id)
+    _, payment_type, product_id_str, selected_size = query.data.split('_')
+    product_id = int(product_id_str)
 
-    # Шаг А: Информирование
-    await query.message.reply_text(
-        "Реквізити для оплати: [Тут будуть ваші реквізити].\n"
-        "Після оплати надішліть скріншот адміністратору."
-    )
-    # Убираем кнопки после выбора
-    await query.edit_message_reply_markup(reply_markup=None)
-
-    # Шаг Б: Получение данных о товаре
+    # Шаг 1: Получаем товар и визуально убираем размер из поста в канале
     product = get_product_by_id(product_id)
+    print(f"DEBUG INFO: Пытаюсь обработать заказ для продукта: {product}")
     if not product or not product['message_id']:
-        print(f"Ошибка: не найден товар {product_id} или message_id для обновления каталога.")
-        return
+        await query.message.reply_text("Вибачте, сталася помилка з товаром. Спробуйте пізніше.")
+        return ConversationHandler.END
 
-    # Шаг В: Обновление базы данных
+    # Формируем новый список размеров без забронированного
     current_sizes = product['sizes'].split(',')
     if selected_size in current_sizes:
         current_sizes.remove(selected_size)
 
-    new_sizes_str = ",".join(sorted(current_sizes, key=int))
-    update_product_sizes(product_id, new_sizes_str)
+    # Редактируем сообщение в канале
+    try:
+        if current_sizes:
+            new_sizes_str = ", ".join(sorted(current_sizes, key=int))
+            new_caption = (f"Натуральна шкіра\n"
+                           f"{new_sizes_str} розмір\n"
+                           f"{product['price']} грн наявність")
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]])
+            await context.bot.edit_message_caption(
+                chat_id=CHANNEL_ID,
+                message_id=product['message_id'],
+                caption=new_caption,
+                reply_markup=keyboard
+            )
+        else:  # Если это был последний размер
+            new_caption = (f"Натуральна шкіра\n"
+                           f"ПРОДАНО\n"
+                           f"{product['price']} грн наявність")
+            await context.bot.edit_message_caption(
+                chat_id=CHANNEL_ID,
+                message_id=product['message_id'],
+                caption=new_caption,
+                reply_markup=None
+            )
+    except Exception as e:
+        print(f"Не удалось отредактировать сообщение в канале при бронировании: {e}")
+        # Если не удалось отредактировать пост, не стоит продолжать бронь
+        await query.message.reply_text("Вибачте, сталася помилка. Не вдалося забронювати товар. Спробуйте пізніше.")
+        return ConversationHandler.END
 
-    # Шаг Г: Обновление каталога
-    if new_sizes_str:
-        new_caption = (f"Натуральна шкіра\n"
-                       f"{new_sizes_str} розмір\n"
-                       f"{product['price']} грн наявність")
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]])
+    # Шаг 2: Запускаем таймер на 30 минут для отмены брони
+    job = context.job_queue.run_once(
+        cancel_reservation,
+        1800,  # 30 минут
+        data={'user_id': user_id, 'product_id': product_id, 'selected_size': selected_size},
+        name=f"reservation_{user_id}_{product_id}"
+    )
+
+    # Шаг 3: Сохраняем данные для следующего шага
+    context.user_data['reservation_job'] = job
+    context.user_data['product_id'] = product_id
+    context.user_data['selected_size'] = selected_size
+
+    # Шаг 4: Информируем пользователя
+    await query.edit_message_reply_markup(reply_markup=None)
+    await query.message.reply_text(
+        "Реквізити для оплати: [Тут будуть ваші реквізити].\n"
+        "Товар тимчасово заброньовано. У вас є 30 хвилин, щоб надіслати скріншот або файл, що підтверджує оплату. "
+        "В іншому випадку бронь буде скасована, і товар знову стане доступним."
+    )
+
+    return AWAITING_PROOF
+
+
+async def cancel_reservation(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Отменяет визуальную бронь, возвращая посту в канале исходное состояние.
+    НЕ изменяет базу данных.
+    """
+    job_data = context.job.data
+    product_id = job_data['product_id']
+    user_id = job_data['user_id']
+    selected_size = job_data['selected_size']
+
+    # Получаем актуальное состояние товара из БД (там размер не удалялся)
+    product = get_product_by_id(product_id)
+    if not product or not product['message_id']:
+        print(f"Ошибка отмены брони: товар {product_id} или message_id не найден.")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"На жаль, час на оплату товару (ID: {product_id}, розмір: {selected_size}) вичерпано. Ваша бронь скасовано."
+        )
+        return
+
+    # Восстанавливаем подпись в посте канала, используя данные из БД как источник правды
+    original_sizes_str = ", ".join(sorted(product['sizes'].split(','), key=int))
+
+    new_caption = (f"Натуральна шкіра\n"
+                   f"{original_sizes_str} розмір\n"
+                   f"{product['price']} грн наявність")
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]])
+
+    try:
         await context.bot.edit_message_caption(
             chat_id=CHANNEL_ID,
             message_id=product['message_id'],
-            caption=new_caption, reply_markup=keyboard
+            caption=new_caption,
+            reply_markup=keyboard
         )
-    else:  # Все размеры проданы
-        new_caption = (f"Натуральна шкіра\n"
-                       f"ПРОДАНО\n"
-                       f"{product['price']} грн наявність")
-        await context.bot.edit_message_caption(
-            chat_id=CHANNEL_ID,
-            message_id=product['message_id'],
-            caption=new_caption, reply_markup=None
-        )
+    except Exception as e:
+        print(f"Не удалось обновить сообщение в канале при отмене брони: {e}")
+
+    # Уведомляем пользователя
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=f"На жаль, час на оплату товару (ID: {product_id}, розмір: {selected_size}) вичерпано. Ваша бронь скасовано. Товар знову доступний для покупки."
+    )
+
+
+async def proof_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Принимает подтверждение оплаты, отменяет таймер и запрашивает ФИО."""
+    # Отменяем таймер отмены брони
+    job = context.user_data.get('reservation_job')
+    if job:
+        job.schedule_removal()
+        print(f"Таймер брони {job.name} отменен.")
+
+    file_id = None
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+    elif update.message.document:
+        file_id = update.message.document.file_id
+
+    if file_id:
+        context.user_data['proof_file_id'] = file_id
+
+    await update.message.reply_text(
+        "Дякуємо! Ваше підтвердження отримано. "
+        "Будь ласка, введіть Ваше ПІБ (прізвище, ім'я, по батькові)."
+    )
+    return AWAITING_NAME
+
+
+async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сохраняет ФИО и запрашивает номер телефона."""
+    context.user_data['full_name'] = update.message.text
+    await update.message.reply_text("Введіть Ваш номер телефону.")
+    return AWAITING_PHONE
+
+
+async def phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сохраняет телефон и запрашивает город."""
+    context.user_data['phone_number'] = update.message.text
+    await update.message.reply_text("Введіть Ваше місто.")
+    return AWAITING_CITY
+
+
+async def city_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сохраняет город и запрашивает отделение Новой Почты."""
+    context.user_data['city'] = update.message.text
+    await update.message.reply_text("Введіть номер відділення Нової Пошти.")
+    return AWAITING_POST_OFFICE
+
+
+async def post_office_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сохраняет отделение, завершает сбор данных и диалог."""
+    context.user_data['post_office'] = update.message.text
+
+    # На этом этапе все данные собраны.
+    # Логика отправки менеджеру будет на следующем шаге.
+    await update.message.reply_text(
+        "Дякуємо! Всі дані отримано. Ваше замовлення передається менеджеру на перевірку."
+    )
+
+    return ConversationHandler.END
 
 
 async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -440,8 +569,21 @@ def main() -> None:
         fallbacks=[CommandHandler('cancel', cancel)],
     )
 
+    payment_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(payment_callback, pattern='^payment_')],
+        states={
+            AWAITING_PROOF: [MessageHandler(filters.PHOTO | filters.Document.ALL, proof_received)],
+            AWAITING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_received)],
+            AWAITING_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, phone_received)],
+            AWAITING_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, city_received)],
+            AWAITING_POST_OFFICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, post_office_received)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
+    application.add_handler(payment_conv_handler)
     application.add_handler(CommandHandler("catalog", show_catalog))
     application.add_handler(CommandHandler("delete", show_delete_list))
     application.add_handler(CallbackQueryHandler(delete_callback, pattern='^del_'))
@@ -449,7 +591,6 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(cancel_delete_callback, pattern='^cancel_del$'))
     application.add_handler(CallbackQueryHandler(republish_callback, pattern='^repub_'))
     application.add_handler(CallbackQueryHandler(size_callback, pattern='^ps_'))
-    application.add_handler(CallbackQueryHandler(payment_callback, pattern='^payment_'))
 
     application.run_polling()
 
