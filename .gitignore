@@ -1,9 +1,1 @@
-# Файл с секретными данными
-config.py
-
-# Системные файлы Python
-__pycache__/
-*.pyc
-
-# Системные файлы macOS
-.DS_Store
+shop.db
