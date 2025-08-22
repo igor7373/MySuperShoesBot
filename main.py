@@ -7,7 +7,7 @@ from telegram.ext import (Application, CommandHandler, ContextTypes,
                           filters, CallbackQueryHandler)
 
 from config import ADMIN_ID, CHANNEL_ID, TELEGRAM_BOT_TOKEN, BOT_USERNAME
-from database import (add_product, get_all_products, get_product_by_id, init_db,
+from database import (add_product, get_all_products, get_products_by_size, get_product_by_id, init_db,
                       set_product_sold, update_message_id, update_product_price,
                       update_product_sizes,
                       delete_product_by_id)
@@ -17,6 +17,7 @@ PHOTO, SELECTING_SIZES, ENTERING_PRICE, AWAITING_PROOF, AWAITING_NAME, AWAITING_
 SETTING_DETAILS = 10
 ENTERING_NEW_PRICE = 11
 EDITING_SIZES = 12
+AWAITING_SIZE_SEARCH = 13
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -763,6 +764,46 @@ async def edit_sizes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     return EDITING_SIZES
 
 
+async def find_size_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает диалог поиска по размеру."""
+    await update.message.reply_text("Введіть розмір для пошуку:")
+    return AWAITING_SIZE_SEARCH
+
+
+async def size_search_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает размер от пользователя, ищет товары в базе данных и отправляет результаты."""
+    size_text = update.message.text
+    if not size_text.isdigit():
+        await update.message.reply_text("Будь ласка, введіть розмір коректно у вигляді числа.")
+        return AWAITING_SIZE_SEARCH
+
+    size = int(size_text)
+    products = get_products_by_size(size)
+
+    if not products:
+        await update.message.reply_text("На жаль, за вашим запитом нічого не знайдено.")
+        return ConversationHandler.END
+
+    await update.message.reply_text("Ось що ми знайшли:")
+    for product in products:
+        caption = f"Ціна: {product['price']} грн."
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]]
+        )
+
+        if product['file_id'].startswith("BAAC"):
+            await context.bot.send_video(
+                chat_id=update.effective_chat.id,
+                video=product['file_id'], caption=caption, reply_markup=keyboard
+            )
+        else:
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=product['file_id'], caption=caption, reply_markup=keyboard
+            )
+    return ConversationHandler.END
+
+
 async def show_delete_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Выводит список товаров для удаления."""
     if update.effective_user.id != ADMIN_ID:
@@ -929,9 +970,18 @@ def main() -> None:
         fallbacks=[CommandHandler('cancel', cancel)],
     )
 
+    find_size_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('findsize', find_size_start)],
+        states={
+            AWAITING_SIZE_SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, size_search_received)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
     application.add_handler(details_conv_handler)
     application.add_handler(edit_price_conv_handler)
     application.add_handler(edit_sizes_conv_handler)
+    application.add_handler(find_size_conv_handler)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)

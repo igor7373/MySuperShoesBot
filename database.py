@@ -53,6 +53,29 @@ def get_all_products():
     return products
 
 
+def get_products_by_size(size):
+    """
+    Возвращает список всех товаров, которые не проданы и доступны в указанном размере.
+    """
+    conn = sqlite3.connect('shop.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    size_str = str(size)
+    # Ищем точное совпадение, или в начале, или в конце, или в середине списка
+    cursor.execute("""
+        SELECT * FROM products
+        WHERE is_sold = 0 AND (
+            sizes = ? OR
+            sizes LIKE ? OR
+            sizes LIKE ? OR
+            sizes LIKE ?
+        )
+    """, (size_str, f"{size_str},%", f"%,{size_str}", f"%,{size_str},%"))
+    products = cursor.fetchall()
+    conn.close()
+    return products
+
+
 def get_product_by_id(product_id: int):
     """
     Возвращает информацию о товаре по его ID.
