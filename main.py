@@ -8,12 +8,15 @@ from telegram.ext import (Application, CommandHandler, ContextTypes,
 
 from config import ADMIN_ID, CHANNEL_ID, TELEGRAM_BOT_TOKEN, BOT_USERNAME
 from database import (add_product, get_all_products, get_product_by_id, init_db,
-                      set_product_sold, update_message_id, update_product_sizes,
+                      set_product_sold, update_message_id, update_product_price,
+                      update_product_sizes,
                       delete_product_by_id)
 
 # Определяем состояния для диалога
 PHOTO, SELECTING_SIZES, ENTERING_PRICE, AWAITING_PROOF, AWAITING_NAME, AWAITING_PHONE, AWAITING_CITY, AWAITING_DELIVERY_CHOICE, AWAITING_NP_DETAILS, AWAITING_UP_DETAILS = range(10)
 SETTING_DETAILS = 10
+ENTERING_NEW_PRICE = 11
+EDITING_SIZES = 12
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -208,9 +211,12 @@ async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
         is_admin = update.effective_user.id == ADMIN_ID
         if is_admin:
-            keyboard = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("🔁 Опублікувати знову", callback_data=f"repub_{product['id']}")]]
-            )
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📝 Редагувати", callback_data=f"edit_{product['id']}"),
+                    InlineKeyboardButton("🔁 Опублікувати", callback_data=f"repub_{product['id']}")
+                ]
+            ])
         else:
             keyboard = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]]
@@ -594,6 +600,169 @@ async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         print(f"!!! КРИТИЧЕСКАЯ ОШИБКА в republish_callback: {e}")
 
 
+async def edit_product_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает нажатие на кнопку 'Редагувати' и показывает меню редактирования."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        product_id = int(query.data.split('_')[1])
+    except (IndexError, ValueError):
+        await query.edit_message_text("Помилка: Некоректний ID товару.")
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💰 Змінити ціну", callback_data=f"edit_price_{product_id}")],
+        [InlineKeyboardButton("📏 Змінити розміри", callback_data=f"edit_sizes_{product_id}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data=f"back_to_catalog_{product_id}")]
+    ])
+
+    await query.edit_message_reply_markup(reply_markup=keyboard)
+
+
+async def back_to_catalog_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает нажатие на кнопку 'Назад' и возвращает к исходной клавиатуре каталога."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        product_id = int(query.data.split('_')[3])
+    except (IndexError, ValueError):
+        await query.edit_message_text("Помилка: Некоректний ID товару.")
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📝 Редагувати", callback_data=f"edit_{product_id}"),
+            InlineKeyboardButton("🔁 Опублікувати", callback_data=f"repub_{product_id}")
+        ]
+    ])
+
+    await query.edit_message_reply_markup(reply_markup=keyboard)
+
+
+async def edit_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает диалог изменения цены."""
+    query = update.callback_query
+    await query.answer()
+
+    product_id = int(query.data.split('_')[2])
+    context.user_data['current_product_id'] = product_id
+    context.user_data['message_to_edit_id'] = query.message.message_id
+
+    await query.message.reply_text("Введіть нову ціну:")
+    return ENTERING_NEW_PRICE
+
+
+async def receive_new_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает новую цену, обновляет товар и исходное сообщение."""
+    new_price_text = update.message.text
+    if not new_price_text.isdigit():
+        await update.message.reply_text("Будь ласка, введіть коректну ціну у вигляді числа.")
+        return ENTERING_NEW_PRICE
+
+    new_price = int(new_price_text)
+    product_id = context.user_data.get('current_product_id')
+    message_id = context.user_data.get('message_to_edit_id')
+    chat_id = update.effective_chat.id
+
+    if not product_id or not message_id:
+        await update.message.reply_text("Сталася помилка, спробуйте знову.")
+        return ConversationHandler.END
+
+    update_product_price(product_id, new_price)
+    product = get_product_by_id(product_id)
+
+    new_caption = f"Ціна: {product['price']} грн.\nРозміри в наявності: {product['sizes']}"
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📝 Редагувати", callback_data=f"edit_{product_id}"),
+            InlineKeyboardButton("🔁 Опублікувати", callback_data=f"repub_{product_id}")
+        ]
+    ])
+
+    await context.bot.edit_message_caption(
+        chat_id=chat_id, message_id=message_id, caption=new_caption, reply_markup=keyboard
+    )
+    await update.message.reply_text("✅ Ціну успішно оновлено.")
+
+    context.user_data.pop('current_product_id', None)
+    context.user_data.pop('message_to_edit_id', None)
+    return ConversationHandler.END
+
+
+async def edit_sizes_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает диалог изменения размеров товара."""
+    query = update.callback_query
+    await query.answer()
+
+    product_id = int(query.data.split('_')[2])
+    product = get_product_by_id(product_id)
+
+    if not product:
+        await query.edit_message_text("Помилка: товар не знайдено.")
+        return ConversationHandler.END
+
+    current_sizes = [int(s) for s in product['sizes'].split(',') if s.isdigit()]
+
+    context.user_data['current_product_id'] = product_id
+    context.user_data['selected_sizes'] = current_sizes
+    context.user_data['message_to_edit_id'] = query.message.message_id
+    context.user_data['chat_id'] = query.message.chat_id
+
+    keyboard = create_sizes_keyboard(current_sizes)
+    await query.message.reply_text(
+        "Оновіть список наявних розмірів:",
+        reply_markup=keyboard
+    )
+    return EDITING_SIZES
+
+
+async def edit_sizes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обрабатывает выбор размеров в режиме редактирования."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    selected_sizes = context.user_data.get('selected_sizes', [])
+
+    if data == 'save':
+        product_id = context.user_data.get('current_product_id')
+        if not product_id:
+            await query.message.reply_text("Сталася помилка, спробуйте знову.")
+            return ConversationHandler.END
+
+        new_sizes_str = ",".join(map(str, sorted(selected_sizes)))
+        update_product_sizes(product_id, new_sizes_str)
+
+        message_id = context.user_data.get('message_to_edit_id')
+        chat_id = context.user_data.get('chat_id')
+        product = get_product_by_id(product_id)
+
+        new_caption = f"Ціна: {product['price']} грн.\nРозміри в наявності: {product['sizes']}"
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("📝 Редагувати", callback_data=f"edit_{product_id}"),
+            InlineKeyboardButton("🔁 Опублікувати", callback_data=f"repub_{product_id}")
+        ]])
+
+        await context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=new_caption, reply_markup=keyboard)
+        await query.message.reply_text("✅ Розміри успішно оновлено.")
+
+        for key in ['current_product_id', 'selected_sizes', 'message_to_edit_id', 'chat_id']:
+            context.user_data.pop(key, None)
+        return ConversationHandler.END
+    elif data == 'undo':
+        if selected_sizes: selected_sizes.pop()
+    else:
+        size = int(data)
+        if size in selected_sizes: selected_sizes.remove(size)
+        else: selected_sizes.append(size)
+    keyboard = create_sizes_keyboard(selected_sizes)
+    text = "Обрано: " + ", ".join(map(str, sorted(selected_sizes))) if selected_sizes else "Оберіть потрібні розміри:"
+    await query.edit_message_text(text=text, reply_markup=keyboard)
+    return EDITING_SIZES
+
+
 async def show_delete_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Выводит список товаров для удаления."""
     if update.effective_user.id != ADMIN_ID:
@@ -743,7 +912,26 @@ def main() -> None:
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
+
+    edit_price_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(edit_price_start, pattern='^edit_price_')],
+        states={
+            ENTERING_NEW_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_new_price)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
+    edit_sizes_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(edit_sizes_start, pattern='^edit_sizes_')],
+        states={
+            EDITING_SIZES: [CallbackQueryHandler(edit_sizes_callback)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
     application.add_handler(details_conv_handler)
+    application.add_handler(edit_price_conv_handler)
+    application.add_handler(edit_sizes_conv_handler)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
@@ -754,6 +942,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(confirm_delete_callback, pattern='^confirm_del_'))
     application.add_handler(CallbackQueryHandler(cancel_delete_callback, pattern='^cancel_del$'))
     application.add_handler(CallbackQueryHandler(republish_callback, pattern='^repub_'))
+    application.add_handler(CallbackQueryHandler(edit_product_callback, pattern='^edit_'))
+    application.add_handler(CallbackQueryHandler(back_to_catalog_callback, pattern='^back_to_catalog_'))
     application.add_handler(CallbackQueryHandler(size_callback, pattern='^ps_'))
     application.add_handler(CallbackQueryHandler(confirm_order_callback, pattern='^confirm_'))
 

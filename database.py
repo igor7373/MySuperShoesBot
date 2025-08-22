@@ -90,6 +90,17 @@ def update_product_sizes(product_id: int, new_sizes: str):
     conn.close()
 
 
+def update_product_price(product_id: int, new_price: int):
+    """
+    Обновляет цену для указанного товара.
+    """
+    conn = sqlite3.connect('shop.db')
+    cursor = conn.cursor()
+    cursor.execute("UPDATE products SET price = ? WHERE id = ?", (new_price, product_id))
+    conn.commit()
+    conn.close()
+
+
 def set_product_sold(product_id: int):
     """
     Устанавливает для товара статус 'продано'.
