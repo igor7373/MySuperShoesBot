@@ -13,6 +13,7 @@ from database import (add_product, get_all_products, get_product_by_id, init_db,
 
 # Определяем состояния для диалога
 PHOTO, SELECTING_SIZES, ENTERING_PRICE, AWAITING_PROOF, AWAITING_NAME, AWAITING_PHONE, AWAITING_CITY, AWAITING_DELIVERY_CHOICE, AWAITING_NP_DETAILS, AWAITING_UP_DETAILS = range(10)
+SETTING_DETAILS = 10
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -667,6 +668,39 @@ async def cancel_delete_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.edit_message_text("Видалення скасовано.")
 
 
+async def set_details_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает диалог смены реквизитов."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        return ConversationHandler.END
+    await update.message.reply_text("Надішліть новий текст з платіжними реквізитами.")
+    return SETTING_DETAILS
+
+
+async def receive_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Получает новые реквизиты и сохраняет их в config.py."""
+    new_details = update.message.text
+    config_path = 'config.py'
+
+    try:
+        with open(config_path, 'r', encoding='utf-8') as file:
+            lines = file.readlines()
+
+        for i, line in enumerate(lines):
+            if line.strip().startswith('PAYMENT_DETAILS ='):
+                lines[i] = f"PAYMENT_DETAILS = '{new_details}'\n"
+                break
+
+        with open(config_path, 'w', encoding='utf-8') as file:
+            file.writelines(lines)
+
+        await update.message.reply_text("✅ Реквізити успішно оновлено.")
+    except Exception as e:
+        print(f"Ошибка при обновлении реквизитов в config.py: {e}")
+        await update.message.reply_text("Помилка! Не вдалося зберегти нові реквізити.")
+    return ConversationHandler.END
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отменяет текущий диалог."""
     await update.message.reply_text("Дію скасовано.")
@@ -701,6 +735,15 @@ def main() -> None:
         },
         fallbacks=[],
     )
+
+    details_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('set_details', set_details_start)],
+        states={
+            SETTING_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_details)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+    application.add_handler(details_conv_handler)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
