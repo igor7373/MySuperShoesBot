@@ -6,11 +6,13 @@ from telegram.ext import (Application, CommandHandler, ContextTypes,
                           ConversationHandler, JobQueue, MessageHandler,
                           filters, CallbackQueryHandler)
 
-from config import ADMIN_ID, CHANNEL_ID, TELEGRAM_BOT_TOKEN, BOT_USERNAME
+from config import ADMIN_ID, CHANNEL_ID, TELEGRAM_BOT_TOKEN, BOT_USERNAME, PAYMENT_DETAILS
 from database import (add_product, get_all_products, get_products_by_size, get_product_by_id, init_db,
                       set_product_sold, update_message_id, update_product_price,
                       update_product_sizes,
                       delete_product_by_id)
+
+active_reservations = {}
 
 # Определяем состояния для диалога
 PHOTO, SELECTING_SIZES, ENTERING_PRICE, AWAITING_PROOF, AWAITING_NAME, AWAITING_PHONE, AWAITING_CITY, AWAITING_DELIVERY_CHOICE, AWAITING_NP_DETAILS, AWAITING_UP_DETAILS = range(10)
@@ -53,6 +55,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Создаем клавиатуру с доступными размерами
         available_sizes = product['sizes'].split(',')
+
+        # Фильтруем размеры, убирая забронированные
+        reserved_for_this_product = active_reservations.get(product_id, set())
+        available_sizes = [size for size in available_sizes if size not in reserved_for_this_product]
+
+        # Если после фильтрации размеров не осталось
+        if not available_sizes:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="Вибачте, всі доступні розміри цього товару зараз заброньовані. Спробуйте пізніше."
+            )
+            return
+
         keyboard_buttons = [
             InlineKeyboardButton(size, callback_data=f"ps_{product['id']}_{size}")
             for size in available_sizes
@@ -260,11 +275,17 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     """
     query = update.callback_query
     await query.answer()
+    print("--- ОТЛАДКА: Шаг 1/7 - Вход в payment_callback ---")
 
     user_id = update.effective_user.id
     # Извлекаем данные (формат: payment_{type}_{product_id}_{size})
     _, payment_type, product_id_str, selected_size = query.data.split('_')
     product_id = int(product_id_str)
+
+    # Регистрируем бронь
+    reservations_for_product = active_reservations.setdefault(product_id, set())
+    reservations_for_product.add(selected_size)
+    print(f"Новая бронь: {active_reservations}")
 
     # Шаг 1: Получаем товар и визуально убираем размер из поста в канале
     product = get_product_by_id(product_id)
@@ -272,15 +293,17 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.message.reply_text("Вибачте, сталася помилка з товаром. Спробуйте пізніше.")
         return ConversationHandler.END
 
-    # Формируем новый список размеров без забронированного
-    current_sizes = product['sizes'].split(',')
-    if selected_size in current_sizes:
-        current_sizes.remove(selected_size)
+    # a. Получаем полный список размеров из БД
+    all_db_sizes = set(product['sizes'].split(','))
+    # b. Получаем все забронированные размеры для этого товара
+    all_reserved_sizes = active_reservations.get(product_id, set())
+    # c. Вычисляем новый список реально доступных размеров
+    final_available_sizes = sorted([size for size in all_db_sizes if size not in all_reserved_sizes], key=int)
 
-    # Редактируем сообщение в канале
+    print("--- ОТЛАДКА: Шаг 2/7 - Начало редактирования поста в канале ---")
     try:
-        if current_sizes:
-            new_sizes_str = ", ".join(sorted(current_sizes, key=int))
+        if final_available_sizes:
+            new_sizes_str = ", ".join(final_available_sizes)
             new_caption = (f"Натуральна шкіра\n"
                            f"{new_sizes_str} розмір\n"
                            f"{product['price']} грн наявність")
@@ -306,7 +329,9 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Если не удалось отредактировать пост, не стоит продолжать бронь
         await query.message.reply_text("Вибачте, сталася помилка. Не вдалося забронювати товар. Спробуйте пізніше.")
         return ConversationHandler.END
+    print("--- ОТЛАДКА: Шаг 3/7 - Пост в канале отредактирован ---")
 
+    print("--- ОТЛАДКА: Шаг 4/7 - Начало установки таймера ---")
     # Шаг 2: Запускаем таймер на 30 минут для отмены брони
     job = context.job_queue.run_once(
         cancel_reservation,
@@ -314,6 +339,7 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         data={'user_id': user_id, 'product_id': product_id, 'selected_size': selected_size},
         name=f"reservation_{user_id}_{product_id}"
     )
+    print("--- ОТЛАДКА: Шаг 5/7 - Таймер установлен ---")
 
     # Шаг 3: Сохраняем данные для следующего шага
     context.user_data['reservation_job'] = job
@@ -322,12 +348,14 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Шаг 4: Информируем пользователя
     await query.edit_message_reply_markup(reply_markup=None)
+    print("--- ОТЛАДКА: Шаг 6/7 - Отправка сообщения пользователю ---")
     await query.message.reply_text(
-        "Реквізити для оплати: [Тут будуть ваші реквізити].\n"
+        f"Реквізити для оплати: {PAYMENT_DETAILS}\n"
         "Товар тимчасово заброньовано. У вас є 30 хвилин, щоб надіслати скріншот або файл, що підтверджує оплату. "
         "В іншому випадку бронь буде скасована, і товар знову стане доступним."
     )
 
+    print("--- ОТЛАДКА: Шаг 7/7 - Выход из payment_callback ---")
     return AWAITING_PROOF
 
 
@@ -340,6 +368,14 @@ async def cancel_reservation(context: ContextTypes.DEFAULT_TYPE) -> None:
     product_id = job_data['product_id']
     user_id = job_data['user_id']
     selected_size = job_data['selected_size']
+
+    # Снимаем бронь из временного хранилища
+    if product_id in active_reservations:
+        active_reservations[product_id].discard(selected_size)
+        # Если для этого товара больше нет броней, удаляем ключ
+        if not active_reservations[product_id]:
+            del active_reservations[product_id]
+    print(f"Бронь снята по таймеру: {active_reservations}")
 
     # Получаем актуальное состояние товара из БД (там размер не удалялся)
     product = get_product_by_id(product_id)
@@ -536,6 +572,13 @@ async def confirm_order_callback(update: Update, context: ContextTypes.DEFAULT_T
         current_sizes.remove(selected_size)
         new_sizes_str = ",".join(sorted(current_sizes, key=int))
         update_product_sizes(product_id, new_sizes_str)
+
+        # Также удаляем бронь из временного хранилища
+        if product_id in active_reservations:
+            active_reservations[product_id].discard(selected_size)
+            if not active_reservations[product_id]:
+                del active_reservations[product_id]
+        print(f"Бронь снята после подтверждения: {active_reservations}")
     else:
         await query.answer("Цей розмір вже було продано або замовлення вже підтверджено.", show_alert=True)
         return
@@ -944,6 +987,7 @@ def main() -> None:
             AWAITING_UP_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, delivery_details_received)],
         },
         fallbacks=[],
+        allow_reentry=True
     )
 
     details_conv_handler = ConversationHandler(
