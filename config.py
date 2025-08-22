@@ -1,4 +1,0 @@
-TELEGRAM_BOT_TOKEN = '8374437865:AAHuoh5ufzQz7OJTfbFT3Vww7mapIbP5eIU'
-ADMIN_ID = 1356045182
-CHANNEL_ID = '-1003087300562'
-BOT_USERNAME = 'MySuperShoesBot' # Замените на username вашего бота без @
