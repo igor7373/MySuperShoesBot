@@ -19,11 +19,17 @@ def init_db():
         )
     ''')
 
+    # Проверяем, существует ли колонка insole_lengths_json
+    cursor.execute("PRAGMA table_info(products)")
+    columns = [column[1] for column in cursor.fetchall()]
+    if 'insole_lengths_json' not in columns:
+        cursor.execute("ALTER TABLE products ADD COLUMN insole_lengths_json TEXT")
+
     conn.commit()
     conn.close()
 
 
-def add_product(file_id: str, price: int, sizes: list[int]):
+def add_product(file_id: str, price: int, sizes: list[int], insole_lengths_json: str):
     """
     Добавляет новый товар в базу данных и возвращает его ID.
     """
@@ -31,8 +37,8 @@ def add_product(file_id: str, price: int, sizes: list[int]):
     cursor = conn.cursor()
 
     sizes_str = ",".join(map(str, sorted(sizes)))
-    cursor.execute("INSERT INTO products (file_id, price, sizes) VALUES (?, ?, ?)",
-                   (file_id, price, sizes_str))
+    cursor.execute("INSERT INTO products (file_id, price, sizes, insole_lengths_json) VALUES (?, ?, ?, ?)",
+                   (file_id, price, sizes_str, insole_lengths_json))
     product_id = cursor.lastrowid
 
     conn.commit()

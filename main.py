@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from apscheduler.jobstores.base import JobLookupError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -6,7 +7,8 @@ from telegram.ext import (Application, CommandHandler, ContextTypes,
                           ConversationHandler, JobQueue, MessageHandler,
                           filters, CallbackQueryHandler)
 
-from config import ADMIN_ID, CHANNEL_ID, TELEGRAM_BOT_TOKEN, BOT_USERNAME, PAYMENT_DETAILS
+from config import (ADMIN_ID, BOT_USERNAME, CHANNEL_ID, INSOLE_LENGTH_MAP,
+                    PAYMENT_DETAILS, TELEGRAM_BOT_TOKEN)
 from database import (add_product, get_all_products, get_products_by_size, get_product_by_id, init_db,
                       set_product_sold, update_message_id, update_product_price,
                       update_product_sizes,
@@ -185,11 +187,27 @@ async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     selected_sizes = context.user_data['selected_sizes']
     price = context.user_data['price']
 
+    # Формируем словарь длин стелек на основе выбранных размеров
+    insole_lengths = {
+        size: INSOLE_LENGTH_MAP.get(size) for size in selected_sizes
+    }
+    insole_lengths_json = json.dumps(insole_lengths)
+
     # Добавляем товар в базу и получаем его ID
-    product_id = add_product(file_id=file_id, price=price, sizes=selected_sizes)
+    product_id = add_product(
+        file_id=file_id, price=price, sizes=selected_sizes,
+        insole_lengths_json=insole_lengths_json
+    )
 
     # Готовим пост для канала
-    sizes_str = ", ".join(map(str, sorted(selected_sizes)))
+    formatted_sizes = []
+    for size in sorted(selected_sizes):
+        length = insole_lengths.get(size)
+        if length is not None:
+            formatted_sizes.append(f"{size} ({length} см)")
+        else:
+            formatted_sizes.append(str(size))
+    sizes_str = ", ".join(formatted_sizes)
     caption = (f"Натуральна шкіра\n"
                f"{sizes_str} розмір\n"
                f"{price} грн наявність")
