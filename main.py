@@ -1,8 +1,10 @@
 import asyncio
 import json
+import logging
 
 from apscheduler.jobstores.base import JobLookupError
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, Update,
+                      InputMediaPhoto, InputMediaVideo)
 from telegram.ext import (Application, CommandHandler, ContextTypes,
                           ConversationHandler, JobQueue, MessageHandler,
                           filters, CallbackQueryHandler)
@@ -13,6 +15,13 @@ from database import (add_product, get_all_products, get_products_by_size, get_p
                       set_product_sold, update_message_id, update_product_price,
                       update_product_sizes,
                       delete_product_by_id)
+
+# Включаем логирование
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 
 active_reservations = {}
 
@@ -831,38 +840,133 @@ async def find_size_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return AWAITING_SIZE_SEARCH
 
 
+async def display_search_page(update: Update, context: ContextTypes.DEFAULT_TYPE, size: int, page: int):
+    """Отображает страницу результатов поиска с галереей и клавиатурой."""
+    all_products = get_products_by_size(size)
+    all_products = [p for p in all_products if str(size) not in active_reservations.get(p['id'], set())]
+
+    chat_id = update.effective_chat.id
+
+    if not all_products and page == 1:
+        await context.bot.send_message(chat_id=chat_id, text="На жаль, за вашим запитом нічого не знайдено.")
+        return
+
+    page_size = 9
+    start_index = (page - 1) * page_size
+    end_index = page * page_size
+    products_on_page = all_products[start_index:end_index]
+
+    if not products_on_page:
+        query = update.callback_query
+        if query:
+            await query.answer("Більше товарів не знайдено.", show_alert=True)
+        return
+
+    # Отправка галереи
+    media_group = []
+    for i, product in enumerate(products_on_page):
+        caption = "Ось що ми знайшли:" if i == 0 and page == 1 else None
+        file_id = product['file_id']
+        if file_id.startswith("BAAC"):
+            media_group.append(InputMediaVideo(media=file_id, caption=caption))
+        else:
+            media_group.append(InputMediaPhoto(media=file_id, caption=caption))
+
+    if media_group:
+        await context.bot.send_media_group(chat_id=chat_id, media=media_group)
+
+    # Отправка клавиатуры
+    keyboard_rows = []
+    for product in products_on_page:
+        length_text_part = ""
+        if product['insole_lengths_json']:
+            try:
+                insole_lengths = json.loads(product['insole_lengths_json'])
+                length = insole_lengths.get(str(size))
+                if length is not None:
+                    length_text_part = f" ({length} см)"
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        button_text = f"{size}{length_text_part}-{product['price']}грн"
+        callback_data = f"gallery_select_{product['id']}"
+        keyboard_rows.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
+
+    nav_buttons = []
+    if start_index > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"search_page_{page - 1}_{size}"))
+    if end_index < len(all_products):
+        nav_buttons.append(InlineKeyboardButton("Далі ➡️", callback_data=f"search_page_{page + 1}_{size}"))
+
+    if nav_buttons:
+        keyboard_rows.append(nav_buttons)
+
+    if keyboard_rows:
+        reply_markup = InlineKeyboardMarkup(keyboard_rows)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="Оберіть товар:",
+            reply_markup=reply_markup
+        )
+
+
 async def size_search_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Получает размер от пользователя, ищет товары в базе данных и отправляет результаты."""
+    """Начинает поиск по размеру и отображает первую страницу результатов."""
     size_text = update.message.text
     if not size_text.isdigit():
         await update.message.reply_text("Будь ласка, введіть розмір коректно у вигляді числа.")
         return AWAITING_SIZE_SEARCH
 
     size = int(size_text)
-    products = get_products_by_size(size)
-
-    if not products:
-        await update.message.reply_text("На жаль, за вашим запитом нічого не знайдено.")
-        return ConversationHandler.END
-
-    await update.message.reply_text("Ось що ми знайшли:")
-    for product in products:
-        caption = f"Ціна: {product['price']} грн."
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]]
-        )
-
-        if product['file_id'].startswith("BAAC"):
-            await context.bot.send_video(
-                chat_id=update.effective_chat.id,
-                video=product['file_id'], caption=caption, reply_markup=keyboard
-            )
-        else:
-            await context.bot.send_photo(
-                chat_id=update.effective_chat.id,
-                photo=product['file_id'], caption=caption, reply_markup=keyboard
-            )
+    await display_search_page(update, context, size=size, page=1)
     return ConversationHandler.END
+
+
+async def search_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает переключение страниц в результатах поиска."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        _, _, page_str, size_str = query.data.split('_')
+        page = int(page_str)
+        size = int(size_str)
+    except (ValueError, IndexError):
+        await query.message.reply_text("Помилка: некоректні дані для пагінації.")
+        return
+
+    # Отображаем новую страницу
+    await display_search_page(update, context, size=size, page=page)
+
+
+async def gallery_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обрабатывает выбор товара из галереи и показывает его детально."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        product_id = int(query.data.split('_')[2])
+    except (IndexError, ValueError):
+        await query.message.reply_text("Помилка: Некоректний ID товару.")
+        return
+
+    product = get_product_by_id(product_id)
+    if not product or not product['sizes']:
+        await query.message.reply_text("Вибачте, цей товар більше не доступний.")
+        return
+
+    sizes_str = ", ".join(sorted(product['sizes'].split(','), key=int))
+    caption = f"Ціна: {product['price']} грн.\nРозміри в наявності: {sizes_str}"
+
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]]
+    )
+
+    file_id = product['file_id']
+    if file_id.startswith("BAAC"):
+        await context.bot.send_video(chat_id=query.message.chat.id, video=file_id, caption=caption, reply_markup=keyboard)
+    else:
+        await context.bot.send_photo(chat_id=query.message.chat.id, photo=file_id, caption=caption, reply_markup=keyboard)
 
 
 async def show_delete_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1058,6 +1162,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(back_to_catalog_callback, pattern='^back_to_catalog_'))
     application.add_handler(CallbackQueryHandler(size_callback, pattern='^ps_'))
     application.add_handler(CallbackQueryHandler(confirm_order_callback, pattern='^confirm_'))
+    application.add_handler(CallbackQueryHandler(search_page_callback, pattern='^search_page_'))
+    application.add_handler(CallbackQueryHandler(gallery_select_callback, pattern='^gallery_select_'))
 
     application.run_polling()
 
