@@ -31,68 +31,111 @@ SETTING_DETAILS = 10
 ENTERING_NEW_PRICE = 11
 EDITING_SIZES = 12
 AWAITING_SIZE_SEARCH = 13
+WAITING_FOR_ACTION = 14
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Обрабатывает команду /start.
     Если команда вызвана с параметром (deep link), запускает процесс покупки.
     Иначе, отправляет приветственное сообщение.
     """
+    print(f"--- ОТЛАДКА: /start получил аргументы: {context.args} ---")
     args = context.args
     if args and args[0].startswith('buy_'):
-        try:
-            product_id = int(args[0].split('_')[1])
-        except (IndexError, ValueError):
-            await update.message.reply_text("Некоректне посилання для покупки.")
-            return
-
-        product = get_product_by_id(product_id)
+        parts = args[0].split('_')
         user_id = update.effective_user.id
 
-        if not product or not product['sizes']:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="Вибачте, цей товар більше не доступний."
-            )
-            return
+        # Новый формат: buy_{product_id}_{size}
+        if len(parts) == 3:
+            try:
+                product_id = int(parts[1])
+                selected_size = parts[2]
+            except (IndexError, ValueError):
+                await update.message.reply_text("Некоректне посилання для покупки.")
+                return ConversationHandler.END
 
-        # Отправляем фото/видео товара в личный чат
-        file_id = product['file_id']
-        if file_id.startswith("BAAC"):
-            await context.bot.send_video(chat_id=user_id, video=file_id)
+            product = get_product_by_id(product_id)
+            if not product or not product['sizes']:
+                await context.bot.send_message(chat_id=user_id, text="Вибачте, цей товар більше не доступний.")
+                return ConversationHandler.END
+
+            # Проверяем, доступен ли размер
+            available_sizes_list = product['sizes'].split(',')
+            reserved_for_this_product = active_reservations.get(product_id, set())
+            if selected_size not in available_sizes_list or selected_size in reserved_for_this_product:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"Вибачте, розмір {selected_size} для цього товару більше не доступний або вже заброньований."
+                )
+                return ConversationHandler.END
+
+            # Отправляем фото/видео товара
+            file_id = product['file_id']
+            if file_id.startswith("BAAC"):
+                await context.bot.send_video(chat_id=user_id, video=file_id)
+            else:
+                await context.bot.send_photo(chat_id=user_id, photo=file_id)
+
+            # Сразу предлагаем оплату (логика из size_callback)
+            text = (f"Ви обрали розмір {selected_size}. Товар буде заброньовано для вас на 30 хвилин "
+                    f"після отримання реквізитів.\n\nОберіть тип оплати:")
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Передплата", callback_data=f"payment_prepay_{product_id}_{selected_size}")],
+                [InlineKeyboardButton("Повна оплата", callback_data=f"payment_full_{product_id}_{selected_size}")]
+            ])
+            await context.bot.send_message(chat_id=user_id, text=text, reply_markup=keyboard)
+
+        # Старый формат: buy_{product_id}
+        elif len(parts) == 2:
+            try:
+                product_id = int(parts[1])
+            except (IndexError, ValueError):
+                await update.message.reply_text("Некоректне посилання для покупки.")
+                return ConversationHandler.END
+
+            product = get_product_by_id(product_id)
+            if not product or not product['sizes']:
+                await context.bot.send_message(chat_id=user_id, text="Вибачте, цей товар більше не доступний.")
+                return ConversationHandler.END
+
+            # Отправляем фото/видео товара в личный чат
+            file_id = product['file_id']
+            if file_id.startswith("BAAC"):
+                await context.bot.send_video(chat_id=user_id, video=file_id)
+            else:
+                await context.bot.send_photo(chat_id=user_id, photo=file_id)
+
+            # Создаем клавиатуру с доступными размерами
+            available_sizes = product['sizes'].split(',')
+            reserved_for_this_product = active_reservations.get(product_id, set())
+            available_sizes = [size for size in available_sizes if size not in reserved_for_this_product]
+
+            if not available_sizes:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="Вибачте, всі доступні розміри цього товару зараз заброньовані. Спробуйте пізніше."
+                )
+                return ConversationHandler.END
+
+            keyboard_buttons = [InlineKeyboardButton(size, callback_data=f"ps_{product['id']}_{size}") for size in available_sizes]
+            keyboard = [keyboard_buttons[i:i + 5] for i in range(0, len(keyboard_buttons), 5)]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await context.bot.send_message(chat_id=user_id, text="Оберіть ваш розмір:", reply_markup=reply_markup)
         else:
-            await context.bot.send_photo(chat_id=user_id, photo=file_id)
-
-        # Создаем клавиатуру с доступными размерами
-        available_sizes = product['sizes'].split(',')
-
-        # Фильтруем размеры, убирая забронированные
-        reserved_for_this_product = active_reservations.get(product_id, set())
-        available_sizes = [size for size in available_sizes if size not in reserved_for_this_product]
-
-        # Если после фильтрации размеров не осталось
-        if not available_sizes:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="Вибачте, всі доступні розміри цього товару зараз заброньовані. Спробуйте пізніше."
-            )
-            return
-
-        keyboard_buttons = [
-            InlineKeyboardButton(size, callback_data=f"ps_{product['id']}_{size}")
-            for size in available_sizes
-        ]
-        keyboard = [keyboard_buttons[i:i + 5] for i in range(0, len(keyboard_buttons), 5)]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(
-            chat_id=user_id,
-            text="Оберіть ваш розмір:",
-            reply_markup=reply_markup
-        )
+            await update.message.reply_text("Некоректне посилання для покупки.")
+        return ConversationHandler.END
+    elif args and args[0] == 'find_size':
+        await update.message.reply_text("Введіть розмір для пошуку:")
+        return AWAITING_SIZE_SEARCH
     else:
-        await update.message.reply_text("Привіт! Я бот для продажу взуття.")
-
+        keyboard = [[InlineKeyboardButton("Пошук за розміром", callback_data='start_find_size')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "Привіт! Я бот для продажу взуття.\n\n"
+            "Натисніть кнопку, щоб знайти пару за вашим розміром.",
+            reply_markup=reply_markup)
+        return WAITING_FOR_ACTION
 
 async def add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает диалог добавления товара и запрашивает фото."""
@@ -836,7 +879,14 @@ async def edit_sizes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def find_size_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает диалог поиска по размеру."""
-    await update.message.reply_text("Введіть розмір для пошуку:")
+    query = update.callback_query
+    text = "Введіть розмір для пошуку:"
+    if query:
+        await query.answer()
+        user_id = query.from_user.id
+        await context.bot.send_message(chat_id=user_id, text=text)
+    else:
+        await update.message.reply_text(text)
     return AWAITING_SIZE_SEARCH
 
 
@@ -889,7 +939,7 @@ async def display_search_page(update: Update, context: ContextTypes.DEFAULT_TYPE
                 pass
 
         button_text = f"{size}{length_text_part}-{product['price']}грн"
-        callback_data = f"gallery_select_{product['id']}"
+        callback_data = f"gallery_select_{product['id']}_{size}"
         keyboard_rows.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
 
     nav_buttons = []
@@ -945,7 +995,8 @@ async def gallery_select_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
 
     try:
-        product_id = int(query.data.split('_')[2])
+        _, _, product_id_str, size = query.data.split('_')
+        product_id = int(product_id_str)
     except (IndexError, ValueError):
         await query.message.reply_text("Помилка: Некоректний ID товару.")
         return
@@ -959,7 +1010,7 @@ async def gallery_select_callback(update: Update, context: ContextTypes.DEFAULT_
     caption = f"Ціна: {product['price']} грн.\nРозміри в наявності: {sizes_str}"
 
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]]
+        [[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}_{size}")]]
     )
 
     file_id = product['file_id']
@@ -1082,6 +1133,36 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
+async def test_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отправляет тестовую кнопку для отладки deep link."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        return
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Тестова кнопка", url=f'https://t.me/{BOT_USERNAME}?start=find_size')]
+    ])
+    await update.message.reply_text('Це тестова кнопка:', reply_markup=keyboard)
+
+
+async def create_find_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Публикует в канале пост с кнопкой для поиска по размеру."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        return
+
+    text = "Для пошуку взуття за розміром, натисніть кнопку справа 👉"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Пошук за розміром", url=f'https://t.me/{BOT_USERNAME}?start=find_size')]
+    ])
+
+    try:
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=keyboard)
+        await update.message.reply_text("✅ Пост с кнопкой поиска успешно опубликован в канале.")
+    except Exception as e:
+        await update.message.reply_text(f"Не вдалося опублікувати пост. Помилка: {e}")
+
+
 def main() -> None:
     """Основная функция для запуска бота."""
     init_db()
@@ -1137,11 +1218,17 @@ def main() -> None:
     )
 
     find_size_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('findsize', find_size_start)],
+        entry_points=[
+            CommandHandler('start', start),
+            CommandHandler('findsize', find_size_start),
+            CallbackQueryHandler(find_size_start, pattern='^start_find_size$')
+        ],
         states={
+            WAITING_FOR_ACTION: [CallbackQueryHandler(find_size_start, pattern='^start_find_size$')],
             AWAITING_SIZE_SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, size_search_received)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
+        per_chat=False,
     )
 
     application.add_handler(details_conv_handler)
@@ -1149,11 +1236,12 @@ def main() -> None:
     application.add_handler(edit_sizes_conv_handler)
     application.add_handler(find_size_conv_handler)
 
-    application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_handler)
     application.add_handler(payment_conv_handler)
     application.add_handler(CommandHandler("catalog", show_catalog))
     application.add_handler(CommandHandler("delete", show_delete_list))
+    application.add_handler(CommandHandler("testbutton", test_button))
+    application.add_handler(CommandHandler('createbuttonpost', create_find_post))
     application.add_handler(CallbackQueryHandler(delete_callback, pattern='^del_'))
     application.add_handler(CallbackQueryHandler(confirm_delete_callback, pattern='^confirm_del_'))
     application.add_handler(CallbackQueryHandler(cancel_delete_callback, pattern='^cancel_del$'))
