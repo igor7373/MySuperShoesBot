@@ -9,7 +9,7 @@ from telegram.ext import (Application, CommandHandler, ContextTypes,
                           ConversationHandler, JobQueue, MessageHandler,
                           filters, CallbackQueryHandler)
 
-from config import (ADMIN_ID, BOT_USERNAME, CHANNEL_ID, INSOLE_LENGTH_MAP,
+from config import (ADMIN_IDS, BOT_USERNAME, CHANNEL_ID, INSOLE_LENGTH_MAP,
                     PAYMENT_DETAILS, TELEGRAM_BOT_TOKEN)
 from database import (add_product, get_all_products, get_products_by_size, get_product_by_id, init_db,
                       set_product_sold, update_message_id, update_product_price,
@@ -139,7 +139,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает диалог добавления товара и запрашивает фото."""
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("Ця команда доступна лише адміністратору.")
         return ConversationHandler.END
     await update.message.reply_text("Завантажте фотографію товару.")
@@ -256,9 +256,9 @@ async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     for size in sorted(selected_sizes):
         length = insole_lengths.get(size)
         if length is not None:
-            formatted_sizes.append(f"{size} ({length} см)")
+            formatted_sizes.append(f"<b>{size}</b> ({length} см)")
         else:
-            formatted_sizes.append(str(size))
+            formatted_sizes.append(f"<b>{size}</b>")
     sizes_str = ", ".join(formatted_sizes)
     caption = (f"Натуральна шкіра\n"
                f"{sizes_str} розмір\n"
@@ -270,11 +270,11 @@ async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Отправляем пост в канал, определяя тип медиа
     if file_id.startswith("BAAC"):  # Примерный префикс для видео
         sent_message = await context.bot.send_video(
-            chat_id=CHANNEL_ID, video=file_id, caption=caption, reply_markup=keyboard
+            chat_id=CHANNEL_ID, video=file_id, caption=caption, reply_markup=keyboard, parse_mode='HTML'
         )
     else:
         sent_message = await context.bot.send_photo(
-            chat_id=CHANNEL_ID, photo=file_id, caption=caption, reply_markup=keyboard
+            chat_id=CHANNEL_ID, photo=file_id, caption=caption, reply_markup=keyboard, parse_mode='HTML'
         )
 
     # Сохраняем message_id в базу
@@ -295,7 +295,7 @@ async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     for product in products:
         caption = f"Ціна: {product['price']} грн.\nРозміри в наявності: {product['sizes']}"
 
-        is_admin = update.effective_user.id == ADMIN_ID
+        is_admin = update.effective_user.id in ADMIN_IDS
         if is_admin:
             keyboard = InlineKeyboardMarkup([
                 [
@@ -373,7 +373,17 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     print("--- ОТЛАДКА: Шаг 2/7 - Начало редактирования поста в канале ---")
     try:
         if final_available_sizes:
-            new_sizes_str = ", ".join(final_available_sizes)
+            # Загружаем длины стелек
+            insole_lengths = json.loads(product['insole_lengths_json']) if product['insole_lengths_json'] else {}
+            # Форматируем размеры с HTML
+            formatted_sizes = []
+            for size in final_available_sizes:
+                length = insole_lengths.get(size)
+                if length is not None:
+                    formatted_sizes.append(f"<b>{size}</b> ({length} см)")
+                else:
+                    formatted_sizes.append(f"<b>{size}</b>")
+            new_sizes_str = ", ".join(formatted_sizes)
             new_caption = (f"Натуральна шкіра\n"
                            f"{new_sizes_str} розмір\n"
                            f"{product['price']} грн наявність")
@@ -382,7 +392,8 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 chat_id=CHANNEL_ID,
                 message_id=product['message_id'],
                 caption=new_caption,
-                reply_markup=keyboard
+                reply_markup=keyboard,
+                parse_mode='HTML'
             )
         else:  # Если это был последний размер
             new_caption = (f"Натуральна шкіра\n"
@@ -458,8 +469,17 @@ async def cancel_reservation(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # Восстанавливаем подпись в посте канала, используя данные из БД как источник правды
-    original_sizes_str = ", ".join(sorted(product['sizes'].split(','), key=int))
+    original_sizes = sorted(product['sizes'].split(','), key=int)
+    insole_lengths = json.loads(product['insole_lengths_json']) if product['insole_lengths_json'] else {}
 
+    formatted_sizes = []
+    for size in original_sizes:
+        length = insole_lengths.get(size)
+        if length is not None:
+            formatted_sizes.append(f"<b>{size}</b> ({length} см)")
+        else:
+            formatted_sizes.append(f"<b>{size}</b>")
+    original_sizes_str = ", ".join(formatted_sizes)
     new_caption = (f"Натуральна шкіра\n"
                    f"{original_sizes_str} розмір\n"
                    f"{product['price']} грн наявність")
@@ -470,7 +490,8 @@ async def cancel_reservation(context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id=CHANNEL_ID,
             message_id=product['message_id'],
             caption=new_caption,
-            reply_markup=keyboard
+            reply_markup=keyboard,
+            parse_mode='HTML'
         )
     except Exception as e:
         print(f"Не удалось обновить сообщение в канале при отмене брони: {e}")
@@ -599,12 +620,12 @@ async def delivery_details_received(update: Update, context: ContextTypes.DEFAUL
     # 3. Отправить заказ менеджеру
     product_file_id = product['file_id']
     if product_file_id.startswith("BAAC"):
-        await context.bot.send_video(chat_id=ADMIN_ID, video=product_file_id)
+        await context.bot.send_video(chat_id=ADMIN_IDS[0], video=product_file_id)
     else:
-        await context.bot.send_photo(chat_id=ADMIN_ID, photo=product_file_id)
+        await context.bot.send_photo(chat_id=ADMIN_IDS[0], photo=product_file_id)
 
-    await context.bot.send_photo(chat_id=ADMIN_ID, photo=proof_file_id, caption="Підтвердження оплати від клієнта")
-    await context.bot.send_message(chat_id=ADMIN_ID, text=order_details, reply_markup=keyboard, parse_mode='HTML')
+    await context.bot.send_photo(chat_id=ADMIN_IDS[0], photo=proof_file_id, caption="Підтвердження оплати від клієнта")
+    await context.bot.send_message(chat_id=ADMIN_IDS[0], text=order_details, reply_markup=keyboard, parse_mode='HTML')
 
     await update.message.reply_text(
         "Дякуємо! Всі дані отримано. Ваше замовлення передається менеджеру на перевірку."
@@ -682,7 +703,17 @@ async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         # Формируем подпись и клавиатуру для поста в канале
-        sizes_str = ", ".join(sorted(product['sizes'].split(',')))
+        original_sizes = sorted(product['sizes'].split(','), key=int)
+        insole_lengths = json.loads(product['insole_lengths_json']) if product['insole_lengths_json'] else {}
+
+        formatted_sizes = []
+        for size in original_sizes:
+            length = insole_lengths.get(size)
+            if length is not None:
+                formatted_sizes.append(f"<b>{size}</b> ({length} см)")
+            else:
+                formatted_sizes.append(f"<b>{size}</b>")
+        sizes_str = ", ".join(formatted_sizes)
         caption = (f"Натуральна шкіра\n"
                    f"{sizes_str} розмір\n"
                    f"{product['price']} грн наявність")
@@ -694,11 +725,11 @@ async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         file_id = product['file_id']
         print(f"Attempting to send post for product {product_id} to channel...")
         if file_id.startswith("BAAC"):
-            sent_message = await context.bot.send_video(
-                chat_id=CHANNEL_ID, video=file_id, caption=caption, reply_markup=keyboard)
+            sent_message = await context.bot.send_video(chat_id=CHANNEL_ID, video=file_id, caption=caption,
+                                                        reply_markup=keyboard, parse_mode='HTML')
         else:
-            sent_message = await context.bot.send_photo(
-                chat_id=CHANNEL_ID, photo=file_id, caption=caption, reply_markup=keyboard)
+            sent_message = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=file_id, caption=caption,
+                                                        reply_markup=keyboard, parse_mode='HTML')
         print(f"Post sent successfully. New message_id: {sent_message.message_id}")
 
         # Обновляем message_id в базе и уведомляем администратора
@@ -1022,7 +1053,7 @@ async def gallery_select_callback(update: Update, context: ContextTypes.DEFAULT_
 
 async def show_delete_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Выводит список товаров для удаления."""
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("Ця команда доступна лише адміністратору.")
         return
 
@@ -1096,7 +1127,7 @@ async def cancel_delete_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 async def set_details_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает диалог смены реквизитов."""
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("Ця команда доступна лише адміністратору.")
         return ConversationHandler.END
     await update.message.reply_text("Надішліть новий текст з платіжними реквізитами.")
@@ -1135,7 +1166,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def test_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Отправляет тестовую кнопку для отладки deep link."""
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("Ця команда доступна лише адміністратору.")
         return
 
@@ -1147,7 +1178,7 @@ async def test_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def create_find_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Публикует в канале пост с кнопкой для поиска по размеру."""
-    if update.effective_user.id != ADMIN_ID:
+    if update.effective_user.id not in ADMIN_IDS:
         await update.message.reply_text("Ця команда доступна лише адміністратору.")
         return
 
@@ -1157,10 +1188,12 @@ async def create_find_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     ])
 
     try:
-        await context.bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=keyboard)
-        await update.message.reply_text("✅ Пост с кнопкой поиска успешно опубликован в канале.")
+        sent_message = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=keyboard)
+        # Закрепляем сообщение в канале с уведомлением для подписчиков
+        await context.bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=sent_message.message_id, disable_notification=False)
+        await update.message.reply_text("✅ Пост с кнопкой поиска успешно опубликован и закреплен в канале.")
     except Exception as e:
-        await update.message.reply_text(f"Не вдалося опублікувати пост. Помилка: {e}")
+        await update.message.reply_text(f"Не вдалося опублікувати та закріпити пост. Помилка: {e}")
 
 
 def main() -> None:
