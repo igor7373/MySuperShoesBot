@@ -62,8 +62,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
             # Проверяем, доступен ли размер
             available_sizes_list = product['sizes'].split(',')
-            reserved_for_this_product = active_reservations.get(product_id, set())
-            if selected_size not in available_sizes_list or selected_size in reserved_for_this_product:
+            reserved_for_this_product = active_reservations.get(product_id, [])
+            if selected_size not in available_sizes_list or available_sizes_list.count(selected_size) <= reserved_for_this_product.count(selected_size):
                 await context.bot.send_message(
                     chat_id=user_id,
                     text=f"Вибачте, розмір {selected_size} для цього товару більше не доступний або вже заброньований."
@@ -107,9 +107,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                 await context.bot.send_photo(chat_id=user_id, photo=file_id)
 
             # Создаем клавиатуру с доступными размерами
-            available_sizes = product['sizes'].split(',')
-            reserved_for_this_product = active_reservations.get(product_id, set())
-            available_sizes = [size for size in available_sizes if size not in reserved_for_this_product]
+            all_db_sizes = product['sizes'].split(',')
+            reserved_sizes = active_reservations.get(product_id, [])
+            available_sizes = list(all_db_sizes)
+            for r_size in reserved_sizes:
+                if r_size in available_sizes:
+                    available_sizes.remove(r_size)
 
             if not available_sizes:
                 await context.bot.send_message(
@@ -353,8 +356,8 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     product_id = int(product_id_str)
 
     # Регистрируем бронь
-    reservations_for_product = active_reservations.setdefault(product_id, set())
-    reservations_for_product.add(selected_size)
+    reservations_for_product = active_reservations.setdefault(product_id, [])
+    reservations_for_product.append(selected_size)
     print(f"Новая бронь: {active_reservations}")
 
     # Шаг 1: Получаем товар и визуально убираем размер из поста в канале
@@ -364,11 +367,15 @@ async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return ConversationHandler.END
 
     # a. Получаем полный список размеров из БД
-    all_db_sizes = set(product['sizes'].split(','))
+    all_db_sizes_list = product['sizes'].split(',')
     # b. Получаем все забронированные размеры для этого товара
-    all_reserved_sizes = active_reservations.get(product_id, set())
+    all_reserved_sizes_list = active_reservations.get(product_id, [])
     # c. Вычисляем новый список реально доступных размеров
-    final_available_sizes = sorted([size for size in all_db_sizes if size not in all_reserved_sizes], key=int)
+    final_available_sizes_list = list(all_db_sizes_list)
+    for r_size in all_reserved_sizes_list:
+        if r_size in final_available_sizes_list:
+            final_available_sizes_list.remove(r_size)
+    final_available_sizes = sorted(final_available_sizes_list, key=int)
 
     print("--- ОТЛАДКА: Шаг 2/7 - Начало редактирования поста в канале ---")
     try:
@@ -451,8 +458,8 @@ async def cancel_reservation(context: ContextTypes.DEFAULT_TYPE) -> None:
     selected_size = job_data['selected_size']
 
     # Снимаем бронь из временного хранилища
-    if product_id in active_reservations:
-        active_reservations[product_id].discard(selected_size)
+    if product_id in active_reservations and selected_size in active_reservations[product_id]:
+        active_reservations[product_id].remove(selected_size)
         # Если для этого товара больше нет броней, удаляем ключ
         if not active_reservations[product_id]:
             del active_reservations[product_id]
@@ -665,8 +672,8 @@ async def confirm_order_callback(update: Update, context: ContextTypes.DEFAULT_T
         update_product_sizes(product_id, new_sizes_str)
 
         # Также удаляем бронь из временного хранилища
-        if product_id in active_reservations:
-            active_reservations[product_id].discard(selected_size)
+        if product_id in active_reservations and selected_size in active_reservations[product_id]:
+            active_reservations[product_id].remove(selected_size)
             if not active_reservations[product_id]:
                 del active_reservations[product_id]
         print(f"Бронь снята после подтверждения: {active_reservations}")
@@ -924,7 +931,9 @@ async def find_size_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def display_search_page(update: Update, context: ContextTypes.DEFAULT_TYPE, size: int, page: int):
     """Отображает страницу результатов поиска с галереей и клавиатурой."""
     all_products = get_products_by_size(size)
-    all_products = [p for p in all_products if str(size) not in active_reservations.get(p['id'], set())]
+    all_products = [
+        p for p in all_products if p['sizes'].split(',').count(str(size)) > active_reservations.get(p['id'], []).count(str(size))
+    ]
 
     chat_id = update.effective_chat.id
 
