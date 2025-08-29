@@ -5,7 +5,7 @@ def init_db():
     """
     Инициализирует базу данных: подключается к shop.db и создает таблицу products.
     """
-    conn = sqlite3.connect('shop.db')
+    conn = sqlite3.connect('shoes_bot.db')
     cursor = conn.cursor()
 
     cursor.execute('''
@@ -33,7 +33,7 @@ def add_product(file_id: str, price: int, sizes: list[int], insole_lengths_json:
     """
     Добавляет новый товар в базу данных и возвращает его ID.
     """
-    conn = sqlite3.connect('shop.db')
+    conn = sqlite3.connect('shoes_bot.db')
     cursor = conn.cursor()
 
     sizes_str = ",".join(map(str, sorted(sizes)))
@@ -50,7 +50,7 @@ def get_all_products():
     """
     Возвращает список всех товаров, которые не проданы.
     """
-    conn = sqlite3.connect('shop.db')
+    conn = sqlite3.connect('shoes_bot.db')
     conn.row_factory = sqlite3.Row  # Позволяет обращаться к колонкам по имени
     cursor = conn.cursor()
     cursor.execute("SELECT id, file_id, price, sizes FROM products WHERE is_sold = 0")
@@ -63,7 +63,7 @@ def get_products_by_size(size):
     """
     Возвращает список всех товаров, которые не проданы и доступны в указанном размере.
     """
-    conn = sqlite3.connect('shop.db')
+    conn = sqlite3.connect('shoes_bot.db')
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     size_str = str(size)
@@ -86,7 +86,7 @@ def get_product_by_id(product_id: int):
     """
     Возвращает информацию о товаре по его ID.
     """
-    conn = sqlite3.connect('shop.db')
+    conn = sqlite3.connect('shoes_bot.db')
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM products WHERE id = ?", (product_id,))
@@ -99,22 +99,26 @@ def update_message_id(product_id: int, message_id: int):
     """
     Обновляет message_id для указанного товара.
     """
-    conn = sqlite3.connect('shop.db')
+    conn = sqlite3.connect('shoes_bot.db')
     cursor = conn.cursor()
     cursor.execute("UPDATE products SET message_id = ? WHERE id = ?", (message_id, product_id))
     conn.commit()
     conn.close()
 
 
-def update_product_sizes(product_id: int, new_sizes: str):
+def update_product_sizes(product_id, new_sizes):
     """
-    Обновляет список доступных размеров для товара.
+    Обновляет список доступных размеров для товара и флаг is_sold.
     """
-    conn = sqlite3.connect('shop.db')
+    conn = sqlite3.connect('shoes_bot.db')
     cursor = conn.cursor()
     cursor.execute("UPDATE products SET sizes = ? WHERE id = ?", (new_sizes, product_id))
     if not new_sizes:
+        # Если размеры закончились, помечаем товар как проданный
         cursor.execute("UPDATE products SET is_sold = 1 WHERE id = ?", (product_id,))
+    else:
+        # Если размеры есть, помечаем товар как не проданный
+        cursor.execute("UPDATE products SET is_sold = 0 WHERE id = ?", (product_id,))
     conn.commit()
     conn.close()
 
@@ -123,7 +127,7 @@ def update_product_price(product_id: int, new_price: int):
     """
     Обновляет цену для указанного товара.
     """
-    conn = sqlite3.connect('shop.db')
+    conn = sqlite3.connect('shoes_bot.db')
     cursor = conn.cursor()
     cursor.execute("UPDATE products SET price = ? WHERE id = ?", (new_price, product_id))
     conn.commit()
@@ -134,7 +138,7 @@ def set_product_sold(product_id: int):
     """
     Устанавливает для товара статус 'продано'.
     """
-    conn = sqlite3.connect('shop.db')
+    conn = sqlite3.connect('shoes_bot.db')
     cursor = conn.cursor()
     cursor.execute("UPDATE products SET is_sold = 1 WHERE id = ?", (product_id,))
     conn.commit()
@@ -145,7 +149,7 @@ def delete_product_by_id(product_id: int):
     """
     Удаляет товар из базы данных по его ID.
     """
-    conn = sqlite3.connect('shop.db')
+    conn = sqlite3.connect('shoes_bot.db')
     cursor = conn.cursor()
     cursor.execute("DELETE FROM products WHERE id = ?", (product_id,))
     conn.commit()

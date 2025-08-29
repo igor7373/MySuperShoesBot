@@ -1,6 +1,9 @@
 import asyncio
 import json
+import uuid
+import re
 import logging
+from datetime import datetime, timedelta
 
 from apscheduler.jobstores.base import JobLookupError
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, Update,
@@ -10,7 +13,8 @@ from telegram.ext import (Application, CommandHandler, ContextTypes,
                           filters, CallbackQueryHandler)
 
 from config import (ADMIN_IDS, BOT_USERNAME, CHANNEL_ID, INSOLE_LENGTH_MAP,
-                    PAYMENT_DETAILS, TELEGRAM_BOT_TOKEN)
+                    PAYMENT_DETAILS, TELEGRAM_BOT_TOKEN, ORDERS_CHANNEL_ID,
+                    DISPATCH_CHANNEL_ID)
 from database import (add_product, get_all_products, get_products_by_size, get_product_by_id, init_db,
                       set_product_sold, update_message_id, update_product_price,
                       update_product_sizes,
@@ -323,194 +327,255 @@ async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def size_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обрабатывает выбор размера и предлагает варианты оплаты."""
+    """Обрабатывает выбор размера и добавляет товар в корзину."""
     query = update.callback_query
     await query.answer()
 
     # Извлекаем данные из callback_data (формат: ps_{product_id}_{size})
-    _, product_id, selected_size = query.data.split('_')
+    _, product_id_str, selected_size = query.data.split('_')
+    product_id = int(product_id_str)
 
-    text = (f"Ви обрали розмір {selected_size}. Товар буде заброньовано для вас на 30 хвилин "
-            f"після отримання реквізитів.\n\nОберіть тип оплати:")
+    # Создаем корзину, если ее нет
+    if 'cart' not in context.user_data:
+        context.user_data['cart'] = []
+
+    # Добавляем товар в корзину
+    context.user_data['cart'].append({'product_id': product_id, 'size': selected_size})
+
+    text = f"✅ Розмір {selected_size} додано до вашого кошика."
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Передплата", callback_data=f"payment_prepay_{product_id}_{selected_size}")],
-        [InlineKeyboardButton("Повна оплата", callback_data=f"payment_full_{product_id}_{selected_size}")]
+        [InlineKeyboardButton("🛒 Оформити замовлення", callback_data='checkout')],
+        [InlineKeyboardButton("🛍️ Продовжити покупки", callback_data='continue_shopping')]
     ])
 
-    await query.message.reply_text(text, reply_markup=keyboard)
+    await query.edit_message_text(text, reply_markup=keyboard)
 
 
-async def payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def continue_shopping_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Удаляет сообщение с кнопками корзины, позволяя пользователю продолжить покупки."""
+    query = update.callback_query
+    await query.answer()
+    await query.message.delete()
+
+
+async def checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показывает сводку по корзине и предлагает перейти к оплате."""
+    query = update.callback_query
+    await query.answer()
+
+    cart = context.user_data.get('cart', [])
+    if not cart:
+        await query.edit_message_text("Ваш кошик порожній.")
+        return
+
+    summary_lines = []
+    total_price = 0
+
+    for item in cart:
+        product_id = item['product_id']
+        size = item['size']
+        product = get_product_by_id(product_id)
+
+        if product:
+            # В базе нет названия, используем ID для идентификации
+            product_name = f"Товар ID {product_id}"
+            price = product['price']
+            summary_lines.append(f"• {product_name}, розмір {size} - {price} грн")
+            total_price += price
+        else:
+            summary_lines.append(f"• Невідомий товар (ID: {product_id}), розмір {size} - помилка")
+
+    summary_text = "🛒 <b>Ваше замовлення:</b>\n\n" + "\n".join(summary_lines)
+    summary_text += f"\n\n💰 <b>Загальна сума: {total_price} грн</b>"
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Перейти до оплати", callback_data='proceed_to_payment')]
+    ])
+
+    await query.edit_message_text(text=summary_text, reply_markup=keyboard, parse_mode='HTML')
+
+
+async def proceed_to_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Предлагает выбрать тип оплаты для всей корзины."""
+    query = update.callback_query
+    await query.answer()
+
+    if not context.user_data.get('cart'):
+        await query.edit_message_text("Ваш кошик порожній. Неможливо перейти до оплати.")
+        return
+
+    text = "Оберіть тип оплати:"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Передплата", callback_data='payment_cart_prepay')],
+        [InlineKeyboardButton("Повна оплата", callback_data='payment_cart_full')]
+    ])
+
+    await query.edit_message_text(text=text, reply_markup=keyboard)
+
+
+async def payment_cart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Начинает гибридный процесс бронирования: визуально убирает размер из канала,
-    запускает таймер, но НЕ изменяет базу данных.
+    Обрабатывает оплату для всей корзины, бронирует товары и запускает таймер.
     """
     query = update.callback_query
     await query.answer()
-    print("--- ОТЛАДКА: Шаг 1/7 - Вход в payment_callback ---")
+    print("\n--- [CART_DEBUG] Шаг 1: Вход в payment_cart_callback ---")
 
     user_id = update.effective_user.id
-    # Извлекаем данные (формат: payment_{type}_{product_id}_{size})
-    _, payment_type, product_id_str, selected_size = query.data.split('_')
-    product_id = int(product_id_str)
-
-    # Регистрируем бронь
-    reservations_for_product = active_reservations.setdefault(product_id, [])
-    reservations_for_product.append(selected_size)
-    print(f"Новая бронь: {active_reservations}")
-
-    # Шаг 1: Получаем товар и визуально убираем размер из поста в канале
-    product = get_product_by_id(product_id)
-    if not product or not product['message_id']:
-        await query.message.reply_text("Вибачте, сталася помилка з товаром. Спробуйте пізніше.")
+    cart = context.user_data.get('cart', [])
+    if not cart:
+        await query.edit_message_text("Ваш кошик порожній.")
         return ConversationHandler.END
 
-    # a. Получаем полный список размеров из БД
-    all_db_sizes_list = product['sizes'].split(',')
-    # b. Получаем все забронированные размеры для этого товара
-    all_reserved_sizes_list = active_reservations.get(product_id, [])
-    # c. Вычисляем новый список реально доступных размеров
-    final_available_sizes_list = list(all_db_sizes_list)
-    for r_size in all_reserved_sizes_list:
-        if r_size in final_available_sizes_list:
-            final_available_sizes_list.remove(r_size)
-    final_available_sizes = sorted(final_available_sizes_list, key=int)
+    reserved_items = []
+    # Предварительная проверка доступности всех товаров в корзине
+    for item in cart:
+        product_id = item['product_id']
+        selected_size = item['size']
+        product = get_product_by_id(product_id)
+        if not product:
+            await query.edit_message_text(f"Помилка: товар ID {product_id} не знайдено.")
+            return ConversationHandler.END
 
-    print("--- ОТЛАДКА: Шаг 2/7 - Начало редактирования поста в канале ---")
-    try:
-        if final_available_sizes:
-            # Загружаем длины стелек
-            insole_lengths = json.loads(product['insole_lengths_json']) if product['insole_lengths_json'] else {}
-            # Форматируем размеры с HTML
-            formatted_sizes = []
-            for size in final_available_sizes:
-                length = insole_lengths.get(size)
-                if length is not None:
-                    formatted_sizes.append(f"<b>{size}</b> ({length} см)")
-                else:
-                    formatted_sizes.append(f"<b>{size}</b>")
-            new_sizes_str = ", ".join(formatted_sizes)
-            new_caption = (f"Натуральна шкіра\n"
-                           f"{new_sizes_str} розмір\n"
-                           f"{product['price']} грн наявність")
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]])
-            await context.bot.edit_message_caption(
-                chat_id=CHANNEL_ID,
-                message_id=product['message_id'],
-                caption=new_caption,
-                reply_markup=keyboard,
-                parse_mode='HTML'
-            )
-        else:  # Если это был последний размер
-            new_caption = (f"Натуральна шкіра\n"
-                           f"ПРОДАНО\n"
-                           f"{product['price']} грн наявність")
-            await context.bot.edit_message_caption(
-                chat_id=CHANNEL_ID,
-                message_id=product['message_id'],
-                caption=new_caption,
-                reply_markup=None
-            )
-    except Exception as e:
-        print(f"Не удалось отредактировать сообщение в канале при бронировании: {e}")
-        # Если не удалось отредактировать пост, не стоит продолжать бронь
-        await query.message.reply_text("Вибачте, сталася помилка. Не вдалося забронювати товар. Спробуйте пізніше.")
-        return ConversationHandler.END
-    print("--- ОТЛАДКА: Шаг 3/7 - Пост в канале отредактирован ---")
+        available_sizes_list = product['sizes'].split(',')
+        reserved_for_this_product = active_reservations.get(product_id, [])
 
-    print("--- ОТЛАДКА: Шаг 4/7 - Начало установки таймера ---")
-    # Шаг 2: Запускаем таймер на 30 минут для отмены брони
-    job = context.job_queue.run_once(
-        cancel_reservation,
-        1800,  # 30 минут
-        data={'user_id': user_id, 'product_id': product_id, 'selected_size': selected_size},
-        name=f"reservation_{user_id}_{product_id}"
-    )
-    print("--- ОТЛАДКА: Шаг 5/7 - Таймер установлен ---")
+        # Считаем, сколько единиц этого размера уже в корзине
+        num_in_cart = sum(1 for i in cart if i['product_id'] == product_id and i['size'] == selected_size)
+        # Считаем, сколько доступно в БД с учетом уже существующих броней
+        num_available_in_db = available_sizes_list.count(selected_size)
+        num_already_reserved = reserved_for_this_product.count(selected_size)
 
-    # Шаг 3: Сохраняем данные для следующего шага
+        if num_in_cart > (num_available_in_db - num_already_reserved):
+            await query.edit_message_text(f"Вибачте, товару ID {product_id} розміру {selected_size} недостатньо в наявності для вашого замовлення.")
+            return ConversationHandler.END
+    print("--- [CART_DEBUG] Шаг 2: Предварительная проверка наличия всех товаров пройдена ---")
+
+    # Если все товары доступны, начинаем бронирование и обновление постов
+    for item in cart:
+        product_id = item['product_id']
+        selected_size = item['size']
+        print(f"--- [CART_DEBUG] Шаг 3: Бронирую товар {item['product_id']}, размер {item['size']} ---")
+
+        # Регистрируем бронь
+        active_reservations.setdefault(product_id, []).append(selected_size)
+        reserved_items.append({'product_id': product_id, 'size': selected_size})
+
+        # Обновляем пост в канале
+        product = get_product_by_id(product_id)
+        if not product or not product['message_id']:
+            continue
+
+        all_db_sizes_list = product['sizes'].split(',')
+        all_reserved_sizes_list = active_reservations.get(product_id, [])
+        final_available_sizes_list = list(all_db_sizes_list)
+        for r_size in all_reserved_sizes_list:
+            if r_size in final_available_sizes_list:
+                final_available_sizes_list.remove(r_size)
+        final_available_sizes = sorted(final_available_sizes_list, key=int)
+
+        try:
+            if final_available_sizes:
+                insole_lengths = json.loads(product['insole_lengths_json']) if product['insole_lengths_json'] else {}
+                formatted_sizes = [f"<b>{s}</b> ({insole_lengths.get(s)} см)" if insole_lengths.get(s) else f"<b>{s}</b>" for s in final_available_sizes]
+                new_sizes_str = ", ".join(formatted_sizes)
+                new_caption = (f"Натуральна шкіра\n{new_sizes_str} розмір\n{product['price']} грн наявність")
+                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]])
+                await context.bot.edit_message_caption(chat_id=CHANNEL_ID, message_id=product['message_id'], caption=new_caption, reply_markup=keyboard, parse_mode='HTML')
+            else:
+                new_caption = (f"Натуральна шкіра\nПРОДАНО\n{product['price']} грн наявність")
+                await context.bot.edit_message_caption(chat_id=CHANNEL_ID, message_id=product['message_id'], caption=new_caption, reply_markup=None)
+        except Exception as e:
+            print(f"Не удалось отредактировать сообщение в канале при бронировании корзины: {e}")
+    print("--- [CART_DEBUG] Шаг 4: Все товары забронированы, посты в канале обновлены ---")
+
+    # Определяем длительность брони и текст сообщения
+    now = datetime.now()
+    if 10 <= now.hour < 19:
+        reservation_duration = 1800
+        user_message = f"Реквізити для оплати:\n(натисніть на номер нижче, щоб скопіювати)\n<code>{PAYMENT_DETAILS}</code>\n\nТовари тимчасово заброньовано. У вас є 30 хвилин, щоб надіслати скріншот або файл, що підтверджує оплату. В іншому випадку бронь буде скасована, і товари знову стануть доступними для продажу."
+    else:
+        tomorrow = now.date() + timedelta(days=1)
+        ten_am_tomorrow = datetime.combine(tomorrow, datetime.min.time()) + timedelta(hours=10)
+        reservation_duration = (ten_am_tomorrow - now).total_seconds()
+        user_message = f"Реквізити для оплати:\n(натисніть на номер нижче, щоб скопіювати)\n<code>{PAYMENT_DETAILS}</code>\n\nТовари тимчасово заброньовано до 10:00 ранку. Надішліть, будь ласка, скріншот або файл, що підтверджує оплату, до цього часу. В іншому випадку бронь буде скасована, і товари знову стануть доступними для продажу."
+
+    job = context.job_queue.run_once(cancel_reservation, reservation_duration, data={'user_id': user_id, 'reserved_items': reserved_items}, name=f"reservation_cart_{user_id}")
     context.user_data['reservation_job'] = job
-    context.user_data['product_id'] = product_id
-    context.user_data['selected_size'] = selected_size
-
-    # Шаг 4: Информируем пользователя
+    context.user_data['cart_items_for_confirmation'] = reserved_items
     await query.edit_message_reply_markup(reply_markup=None)
-    print("--- ОТЛАДКА: Шаг 6/7 - Отправка сообщения пользователю ---")
-    await query.message.reply_text(
-        f"""Реквізити для оплати:
-(натисніть на номер нижче, щоб скопіювати)
-<code>{PAYMENT_DETAILS}</code>
-
-Товар тимчасово заброньовано. У вас є 30 хвилин, щоб надіслати скріншот або файл, що підтверджує оплату. В іншому випадку бронь буде скасована, і товар знову стане доступним для продажу.""",
-        parse_mode='HTML'
-    )
-
-    print("--- ОТЛАДКА: Шаг 7/7 - Выход из payment_callback ---")
+    await query.message.reply_text(user_message, parse_mode='HTML')
+    print("--- [CART_DEBUG] Шаг 5: Таймер установлен, сообщение клиенту отправлено. Переход в состояние AWAITING_PROOF ---")
     return AWAITING_PROOF
+
+
 
 
 async def cancel_reservation(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Отменяет визуальную бронь, возвращая посту в канале исходное состояние.
-    НЕ изменяет базу данных.
+    Отменяет визуальную бронь, возвращая посту в канале исходное состояние. Работает как для одиночных товаров, так и для корзины.
     """
     job_data = context.job.data
-    product_id = job_data['product_id']
     user_id = job_data['user_id']
-    selected_size = job_data['selected_size']
 
-    # Снимаем бронь из временного хранилища
-    if product_id in active_reservations and selected_size in active_reservations[product_id]:
-        active_reservations[product_id].remove(selected_size)
-        # Если для этого товара больше нет броней, удаляем ключ
-        if not active_reservations[product_id]:
-            del active_reservations[product_id]
-    print(f"Бронь снята по таймеру: {active_reservations}")
+    items_to_process = []
+    is_cart_reservation = 'reserved_items' in job_data
 
-    # Получаем актуальное состояние товара из БД (там размер не удалялся)
-    product = get_product_by_id(product_id)
-    if not product or not product['message_id']:
-        print(f"Ошибка отмены брони: товар {product_id} или message_id не найден.")
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"На жаль, час на оплату товару (ID: {product_id}, розмір: {selected_size}) вичерпано. Ваша бронь скасовано."
-        )
-        return
+    if is_cart_reservation:
+        items_to_process.extend(job_data['reserved_items'])
+        user_notification_text = "На жаль, час на оплату замовлення вичерпано. Ваша бронь скасовано. Товари знову доступні для покупки."
+    else:  # Старая логика для одного товара
+        items_to_process.append({'product_id': job_data['product_id'], 'selected_size': job_data['selected_size']})
+        user_notification_text = f"На жаль, час на оплату товару (ID: {job_data['product_id']}, розмір: {job_data['selected_size']}) вичерпано. Ваша бронь скасовано. Товар знову доступний для покупки."
 
-    # Восстанавливаем подпись в посте канала, используя данные из БД как источник правды
-    original_sizes = sorted(product['sizes'].split(','), key=int)
-    insole_lengths = json.loads(product['insole_lengths_json']) if product['insole_lengths_json'] else {}
+    updated_posts = set()
 
-    formatted_sizes = []
-    for size in original_sizes:
-        length = insole_lengths.get(size)
-        if length is not None:
-            formatted_sizes.append(f"<b>{size}</b> ({length} см)")
-        else:
-            formatted_sizes.append(f"<b>{size}</b>")
-    original_sizes_str = ", ".join(formatted_sizes)
-    new_caption = (f"Натуральна шкіра\n"
-                   f"{original_sizes_str} розмір\n"
-                   f"{product['price']} грн наявність")
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]])
+    for item in items_to_process:
+        product_id = item['product_id']
+        selected_size = item['selected_size']
 
-    try:
-        await context.bot.edit_message_caption(
-            chat_id=CHANNEL_ID,
-            message_id=product['message_id'],
-            caption=new_caption,
-            reply_markup=keyboard,
-            parse_mode='HTML'
-        )
-    except Exception as e:
-        print(f"Не удалось обновить сообщение в канале при отмене брони: {e}")
+        # Снимаем бронь из временного хранилища
+        if product_id in active_reservations and selected_size in active_reservations.get(product_id, []):
+            active_reservations[product_id].remove(selected_size)
+            if not active_reservations[product_id]:
+                del active_reservations[product_id]
 
-    # Уведомляем пользователя
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=f"На жаль, час на оплату товару (ID: {product_id}, розмір: {selected_size}) вичерпано. Ваша бронь скасовано. Товар знову доступний для покупки."
-    )
+        if product_id in updated_posts:
+            continue
+
+        product = get_product_by_id(product_id)
+        if not product or not product['message_id']:
+            print(f"Ошибка отмены брони: товар {product_id} или message_id не найден.")
+            continue
+
+        # Восстанавливаем подпись в посте канала, учитывая другие активные брони
+        all_db_sizes_list = product['sizes'].split(',')
+        all_current_reserved_sizes_list = active_reservations.get(product_id, [])
+
+        final_available_sizes_list = list(all_db_sizes_list)
+        for r_size in all_current_reserved_sizes_list:
+            if r_size in final_available_sizes_list:
+                final_available_sizes_list.remove(r_size)
+
+        final_available_sizes = sorted(final_available_sizes_list, key=int)
+
+        insole_lengths = json.loads(product['insole_lengths_json']) if product['insole_lengths_json'] else {}
+        formatted_sizes = [f"<b>{s}</b> ({insole_lengths.get(s)} см)" if insole_lengths.get(s) else f"<b>{s}</b>" for s in final_available_sizes]
+        new_sizes_str = ", ".join(formatted_sizes)
+        new_caption = (f"Натуральна шкіра\n{new_sizes_str} розмір\n{product['price']} грн наявність")
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]])
+
+        try:
+            await context.bot.edit_message_caption(
+                chat_id=CHANNEL_ID, message_id=product['message_id'], caption=new_caption,
+                reply_markup=keyboard, parse_mode='HTML'
+            )
+            updated_posts.add(product_id)
+        except Exception as e:
+            print(f"Не удалось обновить сообщение в канале при отмене брони: {e}")
+
+    await context.bot.send_message(chat_id=user_id, text=user_notification_text)
 
 
 async def proof_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -580,39 +645,44 @@ async def delivery_choice_callback(update: Update, context: ContextTypes.DEFAULT
 
 async def delivery_details_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Сохраняет детали доставки, собирает все данные, отправляет заказ менеджеру
+    Сохраняет детали доставки, собирает все данные по корзине, отправляет заказ менеджеру
     и завершает диалог.
     """
-    # Сохраняем последнюю деталь (номер отделения или индекс)
     context.user_data['delivery_final_detail'] = update.message.text
     user_id = update.effective_user.id
 
-    # 1. Собрать все данные
+    # 1. Собрать все данные по корзине и клиенту
+    cart = context.user_data.get('cart_items_for_confirmation', [])
+    if not cart:
+        await update.message.reply_text("Помилка: ваш кошик порожній. Спробуйте почати спочатку.")
+        return ConversationHandler.END
+
     user_data = context.user_data
-    product_id = user_data.get('product_id')
-    selected_size = user_data.get('selected_size')
     proof_file_id = user_data.get('proof_file_id')
     full_name = user_data.get('full_name')
     phone_number = user_data.get('phone_number')
     city = user_data.get('city')
     delivery_method = user_data.get('delivery_method')
     delivery_final_detail = user_data.get('delivery_final_detail')
-
-    product = get_product_by_id(product_id)
-    if not product:
-        await update.message.reply_text(
-            "Вибачте, сталася помилка з вашим замовленням. "
-            "Будь ласка, зв'яжіться з менеджером напряму."
-        )
-        context.user_data.clear()
-        return ConversationHandler.END
-
+    
     # 2. Сформировать "карточку заказа" для менеджера
+    order_items_text_lines = []
+    total_price = 0
+    for item in cart:
+        product = get_product_by_id(item['product_id'])
+        if product:
+            price = product['price']
+            total_price += price
+            order_items_text_lines.append(f"• Товар ID {item['product_id']}, розмір {item['size']} - {price} грн")
+        else:
+            order_items_text_lines.append(f"• Товар ID {item['product_id']}, розмір {item['size']} - НЕ ЗНАЙДЕНО")
+
+    order_items_text = "\n".join(order_items_text_lines)
+
     order_details = (
         f"🚨 <b>НОВЕ ЗАМОВЛЕННЯ</b> 🚨\n\n"
-        f"<b>Товар ID:</b> {product_id}\n"
-        f"<b>Обраний розмір:</b> {selected_size}\n"
-        f"<b>Ціна:</b> {product['price']} грн\n\n"
+        f"<b>Склад замовлення:</b>\n{order_items_text}\n\n"
+        f"<b>Загальна сума:</b> {total_price} грн\n\n"
         f"👤 <b>Клієнт:</b>\n"
         f"<b>ПІБ:</b> {full_name}\n"
         f"<b>Телефон:</b> {phone_number}\n"
@@ -623,19 +693,28 @@ async def delivery_details_received(update: Update, context: ContextTypes.DEFAUL
     else:
         order_details += f"<b>Індекс Укрпошти:</b> {delivery_final_detail}"
 
+    # Генерируем уникальный ID для заказа и сохраняем корзину
+    order_id = str(uuid.uuid4())
+    context.bot_data[order_id] = cart
+
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Підтвердити замовлення", callback_data=f"confirm_{product_id}_{selected_size}_{user_id}")]
+        [InlineKeyboardButton("✅ Підтвердити замовлення", callback_data=f"confirm_cart_{order_id}_{user_id}")]
     ])
 
     # 3. Отправить заказ менеджеру
-    product_file_id = product['file_id']
-    if product_file_id.startswith("BAAC"):
-        await context.bot.send_video(chat_id=ADMIN_IDS[0], video=product_file_id)
-    else:
-        await context.bot.send_photo(chat_id=ADMIN_IDS[0], photo=product_file_id)
+    # Сначала все фото/видео товаров
+    for item in cart:
+        product = get_product_by_id(item['product_id'])
+        if product:
+            product_file_id = product['file_id']
+            if product_file_id.startswith("BAAC"):
+                await context.bot.send_video(chat_id=ORDERS_CHANNEL_ID, video=product_file_id)
+            else:
+                await context.bot.send_photo(chat_id=ORDERS_CHANNEL_ID, photo=product_file_id)
 
-    await context.bot.send_photo(chat_id=ADMIN_IDS[0], photo=proof_file_id, caption="Підтвердження оплати від клієнта")
-    await context.bot.send_message(chat_id=ADMIN_IDS[0], text=order_details, reply_markup=keyboard, parse_mode='HTML')
+    # Затем подтверждение оплаты и детали заказа
+    await context.bot.send_photo(chat_id=ORDERS_CHANNEL_ID, photo=proof_file_id, caption="Підтвердження оплати від клієнта")
+    await context.bot.send_message(chat_id=ORDERS_CHANNEL_ID, text=order_details, reply_markup=keyboard, parse_mode='HTML')
 
     await update.message.reply_text(
         "Дякуємо! Всі дані отримано. Ваше замовлення передається менеджеру на перевірку."
@@ -646,45 +725,58 @@ async def delivery_details_received(update: Update, context: ContextTypes.DEFAUL
 
 async def confirm_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Обрабатывает подтверждение заказа менеджером: удаляет размер из БД,
+    Обрабатывает подтверждение заказа по корзине: удаляет размеры из БД,
     уведомляет клиента и обновляет сообщение для менеджера.
     """
     query = update.callback_query
     await query.answer()
 
-    # 1. Извлечь данные
+    # 1. Извлечь данные (формат: confirm_cart_{order_id}_{user_id})
     try:
-        _, product_id_str, selected_size, user_id_str = query.data.split('_')
-        product_id = int(product_id_str)
+        print("\n--- [CONFIRM_DEBUG] Шаг 1: Вход в confirm_order_callback ---")
+        _, _, order_id, user_id_str = query.data.split('_')
         user_id = int(user_id_str)
+        print(f"--- [CONFIRM_DEBUG] Шаг 2: Разобраны данные: order_id={order_id}, user_id={user_id} ---")
     except (ValueError, IndexError) as e:
         print(f"Ошибка разбора callback_data в confirm_order_callback: {e}")
         await query.edit_message_text("Помилка: Некоректні дані в кнопці.")
         return
 
-    # 2. Удалить размер из БД
-    product = get_product_by_id(product_id)
-    if not product:
-        await query.edit_message_text(f"Помилка: Товар ID {product_id} не знайдено.")
+    # 2. Извлечь корзину из bot_data
+    cart = context.bot_data.pop(order_id, [])
+    print(f"--- [CONFIRM_DEBUG] Шаг 3: Извлечена корзина: {cart} ---")
+    if not cart:
+        await query.answer("Це замовлення вже було оброблено або не знайдено.", show_alert=True)
+        # Обновляем сообщение, чтобы убрать кнопку и показать, что обработано
+        new_text = query.message.text + "\n\n<b>⚠️ ЗАМОВЛЕННЯ ВЖЕ ОБРОБЛЕНО</b>"
+        await query.edit_message_text(text=new_text, reply_markup=None, parse_mode='HTML')
         return
 
-    current_sizes = product['sizes'].split(',')
-    if selected_size in current_sizes:
-        current_sizes.remove(selected_size)
-        new_sizes_str = ",".join(sorted(current_sizes, key=int))
-        update_product_sizes(product_id, new_sizes_str)
+    # 3. Обработать каждый товар в корзине
+    for item in cart:
+        print(f"--- [CONFIRM_DEBUG] Шаг 4: Обрабатываю товар {item} ---")
+        product_id = item['product_id']
+        selected_size = item['size']
 
-        # Также удаляем бронь из временного хранилища
-        if product_id in active_reservations and selected_size in active_reservations[product_id]:
+        # Удаляем размер из БД
+        product = get_product_by_id(product_id)
+        if product:
+            current_sizes = product['sizes'].split(',')
+            if selected_size in current_sizes:
+                current_sizes.remove(selected_size)
+                new_sizes_str = ",".join(sorted(current_sizes, key=int))
+                update_product_sizes(product_id, new_sizes_str)
+            else:
+                print(f"Предупреждение: Размер {selected_size} для товара {product_id} не найден в БД при подтверждении заказа.")
+
+        # Снимаем бронь из временного хранилища
+        if product_id in active_reservations and selected_size in active_reservations.get(product_id, []):
             active_reservations[product_id].remove(selected_size)
             if not active_reservations[product_id]:
                 del active_reservations[product_id]
-        print(f"Бронь снята после подтверждения: {active_reservations}")
-    else:
-        await query.answer("Цей розмір вже було продано або замовлення вже підтверджено.", show_alert=True)
-        return
+    print(f"Брони сняты после подтверждения заказа {order_id}: {active_reservations}")
 
-    # 3. Уведомить клиента
+    # 4. Уведомить клиента
     try:
         await context.bot.send_message(
             chat_id=user_id,
@@ -693,9 +785,160 @@ async def confirm_order_callback(update: Update, context: ContextTypes.DEFAULT_T
     except Exception as e:
         print(f"Не удалось отправить уведомление клиенту {user_id}: {e}")
 
-    # 4. Обновить сообщение для менеджера
+    # 5. Пересылаем подтвержденный заказ в канал для отправок
+    print("--- [CONFIRM_DEBUG] Шаг 5: Готовлюсь к отправке в канал 'Отправки' ---")
+    try:
+        # Сначала отправляем фото/видео каждого товара
+        for item in cart:
+            product = get_product_by_id(item['product_id'])
+            if product:
+                product_file_id = product['file_id']
+                if product_file_id.startswith("BAAC"):
+                    await context.bot.send_video(chat_id=DISPATCH_CHANNEL_ID, video=product_file_id)
+                else:
+                    await context.bot.send_photo(chat_id=DISPATCH_CHANNEL_ID, photo=product_file_id)
+            else:
+                print(f"--- [CONFIRM_DEBUG] Товар {item['product_id']} не найден в БД для отправки фото в канал 'Отправки'")
+
+        original_order_text = query.message.text
+        dispatch_text = (
+            f"\n\n---\n\n🚚 <b>ЗАМОВЛЕННЯ ПЕРЕДАНО НА ВІДПРАВКУ</b>\n\n"
+            f"{original_order_text}\n\n"
+            f"<b>ID Клієнта для ТТН:</b> <code>{user_id}</code>"
+        )
+        await context.bot.send_message(chat_id=DISPATCH_CHANNEL_ID, text=dispatch_text, parse_mode='HTML')
+    except Exception as e:
+        print(f"Не удалось отправить заказ в канал для отправок: {e}")
+        print(f"--- [CONFIRM_DEBUG] ОШИБКА при отправке в канал 'Отправки': {e} ---")
+
+    # 6. Обновить сообщение для менеджера
     new_text = query.message.text + "\n\n<b>✅ ЗАМОВЛЕННЯ ПІДТВЕРДЖЕНО</b>"
     await query.edit_message_text(text=new_text, reply_markup=None, parse_mode='HTML')
+
+
+async def handle_ttn_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Обрабатывает ответ менеджера с ТТН в канале отправок.
+    Извлекает ID клиента, отправляет ему ТТН и обновляет сообщение в канале.
+    """
+    try:
+        print("\n--- [TTN_DEBUG] Шаг 1: Вход в handle_ttn_reply ---")
+        # 1. Получаем ТТН и исходное сообщение
+        ttn_number = update.channel_post.text
+        original_message = update.channel_post.reply_to_message
+
+        if not original_message or not original_message.text:
+            # Менеджер ответил не на сообщение или на сообщение без текста
+            return
+
+        # 2. Извлекаем ID клиента из текста исходного сообщения
+        match = re.search(r"ID Клієнта для ТТН: (\d+)", original_message.text)
+        if not match:
+            # Не удалось найти ID клиента в сообщении
+            print("Не удалось извлечь ID клиента из сообщения для отправки ТТН.")
+            return
+
+        user_id = int(match.group(1))
+        print(f"--- [TTN_DEBUG] Шаг 2: Извлечен user_id: {user_id}. Текст ТТН: {ttn_number} ---")
+
+        # 3. Отправляем ТТН клиенту
+        print(f"--- [TTN_DEBUG] Шаг 3: Пытаюсь отправить сообщение клиенту {user_id} ---")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"Ваше замовлення відправлено! Номер ТТН: {ttn_number}"
+        )
+        print("--- [TTN_DEBUG] Шаг 4: Сообщение клиенту успешно отправлено ---")
+
+        # Шаг 1: Извлечение данных для кнопок
+        product_id_match = re.search(r"Товар ID: (\d+)", original_message.text)
+        size_match = re.search(r"Обраний розмір: (\d+)", original_message.text)
+
+        keyboard = None
+        if product_id_match and size_match:
+            product_id = product_id_match.group(1)
+            size = size_match.group(1)
+            # Шаг 2: Создание кнопок
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Забрали", callback_data=f"status_picked_{product_id}_{size}"),
+                    InlineKeyboardButton("↩️ Відмова", callback_data=f"status_returned_{product_id}_{size}")
+                ]
+            ])
+
+        # 4. Редактируем исходное сообщение в канале
+        new_text = original_message.text + "\n\n✅ <b>ТТН ВІДПРАВЛЕНО КЛІЄНТУ</b>"
+        await original_message.edit_text(text=new_text, reply_markup=keyboard, parse_mode='HTML')
+
+    except Exception as e:
+        print(f"Ошибка в handle_ttn_reply: {e}")
+
+
+async def handle_order_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Обрабатывает нажатия на кнопки статуса заказа ("Забрали" или "Відмова").
+    """
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        _, status, product_id_str, size = query.data.split('_')
+        product_id = int(product_id_str)
+
+        final_text_addition = ""
+        if status == 'picked':
+            final_text_addition = "\n\n✅ <b>ЗАМОВЛЕННЯ УСПІШНО ЗАВЕРШЕНО</b>"
+
+        elif status == 'returned':
+            product = get_product_by_id(product_id)
+            if not product:
+                await query.edit_message_text("Помилка: товар не знайдено в базі.", reply_markup=None)
+                return
+
+            current_sizes = product['sizes'].split(',') if product['sizes'] else []
+            current_sizes.append(size)
+            new_sizes_str = ",".join(sorted(current_sizes, key=int))
+            update_product_sizes(product_id, new_sizes_str)
+
+            # Обновляем пост в основном канале, чтобы показать, что размер снова в наличии
+            updated_product = get_product_by_id(product_id)
+            if updated_product and updated_product['message_id']:
+                try:
+                    # Формируем новую подпись
+                    all_sizes = sorted(updated_product['sizes'].split(','), key=int)
+                    insole_lengths = json.loads(updated_product['insole_lengths_json']) if updated_product['insole_lengths_json'] else {}
+
+                    formatted_sizes = []
+                    for s in all_sizes:
+                        length = insole_lengths.get(s)
+                        if length is not None:
+                            formatted_sizes.append(f"<b>{s}</b> ({length} см)")
+                        else:
+                            formatted_sizes.append(f"<b>{s}</b>")
+
+                    sizes_str = ", ".join(formatted_sizes)
+                    new_caption = (f"Натуральна шкіра\n"
+                                   f"{sizes_str} розмір\n"
+                                   f"{updated_product['price']} грн наявність")
+
+                    keyboard = InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product_id}")]]
+                    )
+
+                    await context.bot.edit_message_caption(
+                        chat_id=CHANNEL_ID, message_id=updated_product['message_id'], caption=new_caption, reply_markup=keyboard, parse_mode='HTML'
+                    )
+                except Exception as e:
+                    print(f"Не удалось обновить пост в основном канале при возврате: {e}")
+
+            final_text_addition = "\n\n↩️ <b>ВІДМОВА. ТОВАР ПОВЕРНЕНО В БАЗУ ДАНИХ</b>"
+
+        if final_text_addition:
+            new_text = query.message.text + final_text_addition
+            await query.edit_message_text(text=new_text, reply_markup=None, parse_mode='HTML')
+            
+    except Exception as e:
+        print(f"Помилка в handle_order_status_callback: {e}")
+        await query.message.reply_text("Сталася помилка при обробці статусу.")
 
 async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обрабатывает нажатие на кнопку 'Опубликовать заново'."""
@@ -909,9 +1152,8 @@ async def edit_sizes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif data == 'undo':
         if selected_sizes: selected_sizes.pop()
     else:
-        size = int(data)
-        if size in selected_sizes: selected_sizes.remove(size)
-        else: selected_sizes.append(size)
+        # Всегда добавляем размер, удаление только по кнопке "undo"
+        selected_sizes.append(int(data))
     keyboard = create_sizes_keyboard(selected_sizes)
     text = "Обрано: " + ", ".join(map(str, sorted(selected_sizes))) if selected_sizes else "Оберіть потрібні розміри:"
     await query.edit_message_text(text=text, reply_markup=keyboard)
@@ -1224,7 +1466,10 @@ def main() -> None:
     )
 
     payment_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(payment_callback, pattern='^payment_')],
+        entry_points=[
+            
+            CallbackQueryHandler(payment_cart_callback, pattern='^payment_cart_')
+        ],
         states={
             AWAITING_PROOF: [MessageHandler(filters.PHOTO | filters.Document.ALL, proof_received)],
             AWAITING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_received)],
@@ -1294,9 +1539,15 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(edit_product_callback, pattern='^edit_'))
     application.add_handler(CallbackQueryHandler(back_to_catalog_callback, pattern='^back_to_catalog_'))
     application.add_handler(CallbackQueryHandler(size_callback, pattern='^ps_'))
-    application.add_handler(CallbackQueryHandler(confirm_order_callback, pattern='^confirm_'))
+    application.add_handler(CallbackQueryHandler(continue_shopping_callback, pattern='^continue_shopping$'))
+    application.add_handler(CallbackQueryHandler(checkout_callback, pattern='^checkout$'))
+    application.add_handler(CallbackQueryHandler(proceed_to_payment_callback, pattern='^proceed_to_payment$'))
+    application.add_handler(CallbackQueryHandler(confirm_order_callback, pattern='^confirm_cart_'))
     application.add_handler(CallbackQueryHandler(search_page_callback, pattern='^search_page_'))
     application.add_handler(CallbackQueryHandler(gallery_select_callback, pattern='^gallery_select_'))
+    application.add_handler(CallbackQueryHandler(handle_order_status_callback, pattern='^status_'))
+    # Обработчик для отправки ТТН
+    application.add_handler(MessageHandler(filters.REPLY & filters.Chat(chat_id=DISPATCH_CHANNEL_ID), handle_ttn_reply))
 
     application.run_polling()
 
