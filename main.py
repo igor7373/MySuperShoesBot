@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 from apscheduler.jobstores.base import JobLookupError
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup, Update,
-                      InputMediaPhoto, InputMediaVideo)
+                      InputMediaPhoto, InputMediaVideo, error)
 from telegram.ext import (Application, CommandHandler, ContextTypes,
                           ConversationHandler, JobQueue, MessageHandler,
                           filters, CallbackQueryHandler)
@@ -742,9 +742,9 @@ async def confirm_order_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("Помилка: Некоректні дані в кнопці.")
         return
 
-    # 2. Извлечь корзину из bot_data
-    cart = context.bot_data.pop(order_id, [])
-    print(f"--- [CONFIRM_DEBUG] Шаг 3: Извлечена корзина: {cart} ---")
+    # 2. Извлечь корзину из bot_data, не удаляя ее
+    cart = context.bot_data.get(order_id)
+    print(f"--- [CONFIRM_DEBUG] Шаг 3: Прочитана корзина (без удаления): {cart} ---")
     if not cart:
         await query.answer("Це замовлення вже було оброблено або не знайдено.", show_alert=True)
         # Обновляем сообщение, чтобы убрать кнопку и показать, что обработано
@@ -804,6 +804,7 @@ async def confirm_order_callback(update: Update, context: ContextTypes.DEFAULT_T
         dispatch_text = (
             f"\n\n---\n\n🚚 <b>ЗАМОВЛЕННЯ ПЕРЕДАНО НА ВІДПРАВКУ</b>\n\n"
             f"{original_order_text}\n\n"
+            f"<b>ID Замовлення:</b> <code>{order_id}</code>\n"
             f"<b>ID Клієнта для ТТН:</b> <code>{user_id}</code>"
         )
         await context.bot.send_message(chat_id=DISPATCH_CHANNEL_ID, text=dispatch_text, parse_mode='HTML')
@@ -819,125 +820,169 @@ async def confirm_order_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def handle_ttn_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Обрабатывает ответ менеджера с ТТН в канале отправок.
-    Извлекает ID клиента, отправляет ему ТТН и обновляет сообщение в канале.
+    Извлекает ID клиента и заказа, отправляет ТТН клиенту и добавляет кнопки статуса.
     """
     try:
         print("\n--- [TTN_DEBUG] Шаг 1: Вход в handle_ttn_reply ---")
-        # 1. Получаем ТТН и исходное сообщение
         ttn_number = update.channel_post.text
         original_message = update.channel_post.reply_to_message
 
         if not original_message or not original_message.text:
-            # Менеджер ответил не на сообщение или на сообщение без текста
             return
 
-        # 2. Извлекаем ID клиента из текста исходного сообщения
-        match = re.search(r"ID Клієнта для ТТН: (\d+)", original_message.text)
-        if not match:
-            # Не удалось найти ID клиента в сообщении
-            print("Не удалось извлечь ID клиента из сообщения для отправки ТТН.")
+        # Извлекаем ID клиента и ID заказа из текста исходного сообщения
+        user_id_match = re.search(r"ID Клієнта для ТТН:\s*(\d+)", original_message.text)
+        order_id_match = re.search(r"ID Замовлення:\s*([\w-]+)", original_message.text)
+
+        if not user_id_match or not order_id_match:
+            print("Не вдалося витягти ID клієнта або ID замовлення з повідомлення для відправки ТТН.")
+            await update.channel_post.reply_text("Помилка: не знайдено ID клієнта або замовлення у вихідному повідомленні.")
             return
 
-        user_id = int(match.group(1))
-        print(f"--- [TTN_DEBUG] Шаг 2: Извлечен user_id: {user_id}. Текст ТТН: {ttn_number} ---")
+        user_id = int(user_id_match.group(1))
+        order_id = order_id_match.group(1)
+        print(f"--- [TTN_DEBUG] Шаг 2: Витягнуто user_id: {user_id}, order_id: {order_id}. Текст ТТН: {ttn_number} ---")
 
-        # 3. Отправляем ТТН клиенту
-        print(f"--- [TTN_DEBUG] Шаг 3: Пытаюсь отправить сообщение клиенту {user_id} ---")
+        # Отправляем ТТН клиенту
         await context.bot.send_message(
             chat_id=user_id,
             text=f"Ваше замовлення відправлено! Номер ТТН: {ttn_number}"
         )
-        print("--- [TTN_DEBUG] Шаг 4: Сообщение клиенту успешно отправлено ---")
+        print("--- [TTN_DEBUG] Шаг 3: Повідомлення клієнту успішно відправлено ---")
 
-        # Шаг 1: Извлечение данных для кнопок
-        product_id_match = re.search(r"Товар ID: (\d+)", original_message.text)
-        size_match = re.search(r"Обраний розмір: (\d+)", original_message.text)
+        # Шаг 1.2: Извлекаем корзину из context.bot_data
+        cart = context.bot_data.get(order_id)
 
-        keyboard = None
-        if product_id_match and size_match:
-            product_id = product_id_match.group(1)
-            size = size_match.group(1)
-            # Шаг 2: Создание кнопок
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Забрали", callback_data=f"status_picked_{product_id}_{size}"),
-                    InlineKeyboardButton("↩️ Відмова", callback_data=f"status_returned_{product_id}_{size}")
-                ]
-            ])
+        if not cart:
+            print(f"--- [TTN_DEBUG] ОШИБКА: Заказ с ID '{order_id}' не найден в context.bot_data. Невозможно создать кнопки статуса.")
+            new_text = original_message.text_html + f"\n\n<b>ТТН:</b> {ttn_number}\n\n✅ <b>ТТН ВІДПРАВЛЕНО КЛІЄНТУ</b>\n\n⚠️ <b>Не вдалося створити кнопки статусу (замовлення не знайдено в пам'яті).</b>"
+            await original_message.edit_text(text=new_text, reply_markup=None, parse_mode='HTML')
+            return
 
-        # 4. Редактируем исходное сообщение в канале
-        new_text = original_message.text + "\n\n✅ <b>ТТН ВІДПРАВЛЕНО КЛІЄНТУ</b>"
+        # Создаем кнопки для статуса заказа, содержащие только order_id
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Забрали", callback_data=f"status_picked_cart_{order_id}"),
+                InlineKeyboardButton("↩️ Відмова", callback_data=f"status_returned_cart_{order_id}")
+            ]
+        ])
+
+        # Редактируем исходное сообщение в канале, добавляя ТТН и кнопки
+        new_text = original_message.text_html + f"\n\n<b>ТТН:</b> {ttn_number}\n\n✅ <b>ТТН ВІДПРАВЛЕНО КЛІЄНТУ</b>"
         await original_message.edit_text(text=new_text, reply_markup=keyboard, parse_mode='HTML')
+        print("--- [TTN_DEBUG] Шаг 4: Повідомлення в каналі відправок оновлено ---")
 
     except Exception as e:
         print(f"Ошибка в handle_ttn_reply: {e}")
+        await update.channel_post.reply_text(f"Сталася помилка при обробці ТТН: {e}")
 
 
 async def handle_order_status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Обрабатывает нажатия на кнопки статуса заказа ("Забрали" или "Відмова").
+    Обрабатывает нажатия на кнопки статуса заказа ("Забрали" или "Відмова") для корзин.
+    (ОТЛАДОЧНАЯ ВЕРСИЯ)
     """
     query = update.callback_query
     await query.answer()
 
+    # --- НАЧАЛО ДИАГНОСТИЧЕСКОГО БЛОКА ---
+    print("\n\n--- [DEBUG] ВХОД В handle_order_status_callback ---")
+    if query and query.data:
+        print(f"--- [DEBUG] Получены данные callback_data: '{query.data}' ---")
+    else:
+        print("--- [DEBUG] ОШИБКА: Не удалось получить callback_data от Telegram. ---")
+        return
+    # --- КОНЕЦ ДИАГНОСТИЧЕСКОГО БЛОКА ---
+
     try:
-        _, status, product_id_str, size = query.data.split('_')
-        product_id = int(product_id_str)
+        # Шаг 2.1: Извлекаем order_id из callback_data
+        parts = query.data.split('_')
+        print(f"--- [DEBUG] Данные разбиты на {len(parts)} частей: {parts} ---")
+
+        if len(parts) == 4 and parts[0] == 'status' and parts[2] == 'cart':
+            status_action = parts[1]
+            order_id = parts[3]
+            print(f"--- [DEBUG] Формат данных корректен. Статус: '{status_action}', ID Заказа: '{order_id}' ---")
+        else:
+            print(f"--- [DEBUG] ОШИБКА: Формат данных '{query.data}' не соответствует ожидаемому 'status_action_cart_orderid'. ---")
+            await query.message.reply_text("Помилка: Некоректний формат даних кнопки статусу.")
+            return
+
+        # Шаг 2.2: Получаем и сразу удаляем заказ из памяти
+        cart = context.bot_data.pop(order_id, None)
+
+        # Шаг 2.3: Проверяем, был ли заказ найден/уже обработан
+        if not cart:
+            print(f"--- [DEBUG] ОШИБКА: Заказ с ID '{order_id}' не найден в context.bot_data или уже был обработан. ---")
+            await query.answer("Це замовлення вже було оброблено або не знайдено.", show_alert=True)
+            new_text = query.message.text_html + "\n\n<b>⚠️ ЗАМОВЛЕННЯ ВЖЕ ОБРОБЛЕНО</b>"
+            await query.edit_message_text(text=new_text, reply_markup=None, parse_mode='HTML')
+            return
+
+        print(f"--- [DEBUG] Заказ '{order_id}' успешно извлечен из памяти. Состав: {cart} ---")
 
         final_text_addition = ""
-        if status == 'picked':
+        if status_action == 'picked':
             final_text_addition = "\n\n✅ <b>ЗАМОВЛЕННЯ УСПІШНО ЗАВЕРШЕНО</b>"
+            print("--- [DEBUG] Статус 'picked'. Завершаю обработку. ---")
 
-        elif status == 'returned':
-            product = get_product_by_id(product_id)
-            if not product:
-                await query.edit_message_text("Помилка: товар не знайдено в базі.", reply_markup=None)
-                return
+        elif status_action == 'returned':
+            print("--- [DEBUG] Статус 'returned'. Начинаю процесс возврата товаров... ---")
+            for item in cart:
+                product_id = item['product_id']
+                size = item['size']
+                print(f"--- [DEBUG] Возвращаю товар ID: {product_id}, Размер: {size} ---")
 
-            current_sizes = product['sizes'].split(',') if product['sizes'] else []
-            current_sizes.append(size)
-            new_sizes_str = ",".join(sorted(current_sizes, key=int))
-            update_product_sizes(product_id, new_sizes_str)
+                product = get_product_by_id(product_id)
+                if not product:
+                    print(f"--- [DEBUG] ОШИБКА: Товар {product_id} не найден в базе данных. ---")
+                    continue
 
-            # Обновляем пост в основном канале, чтобы показать, что размер снова в наличии
-            updated_product = get_product_by_id(product_id)
-            if updated_product and updated_product['message_id']:
-                try:
-                    # Формируем новую подпись
-                    all_sizes = sorted(updated_product['sizes'].split(','), key=int)
-                    insole_lengths = json.loads(updated_product['insole_lengths_json']) if updated_product['insole_lengths_json'] else {}
+                current_sizes = product['sizes'].split(',') if product['sizes'] else []
+                current_sizes.append(size)
+                new_sizes_str = ",".join(sorted(current_sizes, key=int))
+                update_product_sizes(product_id, new_sizes_str)
+                print(f"--- [DEBUG] База данных для товара {product_id} обновлена. Новые размеры: '{new_sizes_str}' ---")
 
-                    formatted_sizes = []
-                    for s in all_sizes:
-                        length = insole_lengths.get(s)
-                        if length is not None:
-                            formatted_sizes.append(f"<b>{s}</b> ({length} см)")
-                        else:
-                            formatted_sizes.append(f"<b>{s}</b>")
+                updated_product = get_product_by_id(product_id)
+                if updated_product and updated_product['message_id']:
+                    print(f"--- [DEBUG] Пытаюсь обновить пост в канале. Message ID: {updated_product['message_id']} ---")
+                    try:
+                        all_sizes = sorted(updated_product['sizes'].split(','), key=int)
+                        insole_lengths = json.loads(updated_product['insole_lengths_json']) if updated_product['insole_lengths_json'] else {}
+                        formatted_sizes = [f"<b>{s}</b> ({insole_lengths.get(s)} см)" if insole_lengths.get(s) else f"<b>{s}</b>" for s in all_sizes]
+                        sizes_str = ", ".join(formatted_sizes)
+                        new_caption = (f"Натуральна шкіра\n"
+                                       f"{sizes_str} розмір\n"
+                                       f"{updated_product['price']} грн наявність")
+                        keyboard = InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product_id}")]
+                        ])
+                        await context.bot.edit_message_caption(
+                            chat_id=CHANNEL_ID, message_id=updated_product['message_id'], caption=new_caption, reply_markup=keyboard, parse_mode='HTML'
+                        )
+                        print(f"--- [DEBUG] Пост для товара {product_id} успешно обновлен. ---")
+                    except Exception as e:
+                        print(f"--- [DEBUG] КРИТИЧЕСКАЯ ОШИБКА при обновлении поста в канале: {e} ---")
+                else:
+                    print(f"--- [DEBUG] ОШИБКА: Не найден message_id для товара {product_id}, не могу обновить пост. ---")
 
-                    sizes_str = ", ".join(formatted_sizes)
-                    new_caption = (f"Натуральна шкіра\n"
-                                   f"{sizes_str} розмір\n"
-                                   f"{updated_product['price']} грн наявність")
-
-                    keyboard = InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product_id}")]]
-                    )
-
-                    await context.bot.edit_message_caption(
-                        chat_id=CHANNEL_ID, message_id=updated_product['message_id'], caption=new_caption, reply_markup=keyboard, parse_mode='HTML'
-                    )
-                except Exception as e:
-                    print(f"Не удалось обновить пост в основном канале при возврате: {e}")
-
-            final_text_addition = "\n\n↩️ <b>ВІДМОВА. ТОВАР ПОВЕРНЕНО В БАЗУ ДАНИХ</b>"
+            final_text_addition = "\n\n↩️ <b>ВІДМОВА. ТОВАРИ ПОВЕРНЕНО В БАЗУ ДАНИХ</b>"
 
         if final_text_addition:
-            new_text = query.message.text + final_text_addition
+            new_text = query.message.text_html + final_text_addition
             await query.edit_message_text(text=new_text, reply_markup=None, parse_mode='HTML')
-            
+            print("--- [DEBUG] Финальное сообщение в канале отправок обновлено. ---")
+
+    except error.BadRequest as e:
+        if "Message is not modified" in str(e):
+            print(f"--- [DEBUG] Сообщение уже было изменено, обработка прекращена: {e} ---")
+            await query.answer("Це замовлення вже було оброблено.", show_alert=True)
+        else:
+            print(f"--- [DEBUG] КРИТИЧЕСКАЯ ОШИБКА BadRequest: {e} ---")
+            await query.message.reply_text(f"Сталася помилка Telegram: {e}")
     except Exception as e:
-        print(f"Помилка в handle_order_status_callback: {e}")
+        print(f"--- [DEBUG] КРИТИЧЕСКАЯ ОШИБКА ВНЕШНЕГО БЛОКА TRY: {e} ---")
         await query.message.reply_text("Сталася помилка при обробці статусу.")
 
 async def republish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1479,7 +1524,7 @@ def main() -> None:
             AWAITING_NP_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, delivery_details_received)],
             AWAITING_UP_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, delivery_details_received)],
         },
-        fallbacks=[],
+        fallbacks=[CommandHandler('cancel', cancel)],
         allow_reentry=True
     )
 
