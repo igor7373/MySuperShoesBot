@@ -335,6 +335,24 @@ async def size_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     _, product_id_str, selected_size = query.data.split('_')
     product_id = int(product_id_str)
 
+    # Шаг 1.1: Получаем информацию о товаре
+    product = get_product_by_id(product_id)
+    if not product:
+        await query.edit_message_text("Помилка: товар не знайдено.")
+        return
+
+    # Шаг 1.2: Извлекаем message_id товара
+    message_id = product['message_id']
+
+    # Формируем URL-ссылку на пост с учетом типа канала (публичный/приватный)
+    if str(CHANNEL_ID).startswith("-100"):
+        # Для приватных каналов убираем префикс -100 и добавляем 'c/'
+        chat_id_for_link = str(CHANNEL_ID).replace('-100', '')
+        post_url = f"https://t.me/c/{chat_id_for_link}/{message_id}"
+    else:
+        # Для публичных каналов (использующих @username)
+        post_url = f"https://t.me/{CHANNEL_ID}/{message_id}"
+
     # Создаем корзину, если ее нет
     if 'cart' not in context.user_data:
         context.user_data['cart'] = []
@@ -344,19 +362,23 @@ async def size_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     text = f"✅ Розмір {selected_size} додано до вашого кошика."
 
+    # Шаг 1.4 и 1.5: Изменяем кнопку "Продовжити покупки" на URL-кнопку
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🛒 Оформити замовлення", callback_data='checkout')],
-        [InlineKeyboardButton("🛍️ Продовжити покупки", callback_data='continue_shopping')]
+        [InlineKeyboardButton("🛍️ Продовжити покупки", url=post_url)]
     ])
 
+    # --- БЛОК ДИАГНОСТИЧЕСКИХ ЛОГОВ ---
+    print("\n--- ДИАГНОСТИКА size_callback ---")
+    print(f"product_id: {product_id}")
+    print(f"Данные из БД (product): {product}")
+    print(f"Извлеченный message_id: {message_id}")
+    print(f"CHANNEL_ID из конфига: {CHANNEL_ID}")
+    print(f"Итоговый post_url: {post_url}")
+    print("--- КОНЕЦ ДИАГНОСТИКИ ---\n")
+    # --- КОНЕЦ БЛОКА ---
+
     await query.edit_message_text(text, reply_markup=keyboard)
-
-
-async def continue_shopping_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Удаляет сообщение с кнопками корзины, позволяя пользователю продолжить покупки."""
-    query = update.callback_query
-    await query.answer()
-    await query.message.delete()
 
 
 async def checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1584,7 +1606,6 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(edit_product_callback, pattern='^edit_'))
     application.add_handler(CallbackQueryHandler(back_to_catalog_callback, pattern='^back_to_catalog_'))
     application.add_handler(CallbackQueryHandler(size_callback, pattern='^ps_'))
-    application.add_handler(CallbackQueryHandler(continue_shopping_callback, pattern='^continue_shopping$'))
     application.add_handler(CallbackQueryHandler(checkout_callback, pattern='^checkout$'))
     application.add_handler(CallbackQueryHandler(proceed_to_payment_callback, pattern='^proceed_to_payment$'))
     application.add_handler(CallbackQueryHandler(confirm_order_callback, pattern='^confirm_cart_'))
