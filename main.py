@@ -188,6 +188,7 @@ def create_sizes_keyboard(selected_sizes: list[int]) -> InlineKeyboardMarkup:
 
     keyboard.append([
         InlineKeyboardButton("⬅️ Скасувати останнє", callback_data='undo'),
+        InlineKeyboardButton("🔄 Очистити все", callback_data='clear_all'),
         InlineKeyboardButton("✅ Зберегти", callback_data='save')
     ])
     return InlineKeyboardMarkup(keyboard)
@@ -1176,10 +1177,7 @@ async def edit_sizes_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data['chat_id'] = query.message.chat_id
 
     keyboard = create_sizes_keyboard(current_sizes)
-    await query.message.reply_text(
-        "Оновіть список наявних розмірів:",
-        reply_markup=keyboard
-    )
+    await query.edit_message_reply_markup(reply_markup=keyboard)
     return EDITING_SIZES
 
 
@@ -1218,6 +1216,8 @@ async def edit_sizes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
     elif data == 'undo':
         if selected_sizes: selected_sizes.pop()
+    elif data == 'clear_all':
+        selected_sizes.clear()
     else:
         # Всегда добавляем размер, удаление только по кнопке "undo"
         selected_sizes.append(int(data))
