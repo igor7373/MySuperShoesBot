@@ -1198,9 +1198,31 @@ async def edit_sizes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         new_sizes_str = ",".join(map(str, sorted(selected_sizes)))
         update_product_sizes(product_id, new_sizes_str)
 
+        # Обновляем пост в основном канале
+        product = get_product_by_id(product_id)
+        if product and product['message_id']:
+            try:
+                insole_lengths = json.loads(product['insole_lengths_json']) if product['insole_lengths_json'] else {}
+                formatted_sizes = [f"<b>{s}</b> ({insole_lengths.get(str(s))} см)" if insole_lengths.get(str(s)) else f"<b>{s}</b>" for s in sorted(selected_sizes)]
+                sizes_for_caption = ", ".join(formatted_sizes)
+                channel_caption = (f"Натуральна шкіра\n"
+                                   f"{sizes_for_caption} розмір\n"
+                                   f"{product['price']} грн наявність")
+                channel_keyboard = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]])
+
+                await context.bot.edit_message_caption(
+                    chat_id=CHANNEL_ID,
+                    message_id=product['message_id'],
+                    caption=channel_caption,
+                    reply_markup=channel_keyboard,
+                    parse_mode='HTML'
+                )
+            except Exception as e:
+                print(f"Error updating channel post after size edit: {e}")
+
         message_id = context.user_data.get('message_to_edit_id')
         chat_id = context.user_data.get('chat_id')
-        product = get_product_by_id(product_id)
 
         new_caption = f"Ціна: {product['price']} грн.\nРозміри в наявності: {product['sizes']}"
         keyboard = InlineKeyboardMarkup([[
@@ -1223,7 +1245,7 @@ async def edit_sizes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         selected_sizes.append(int(data))
     keyboard = create_sizes_keyboard(selected_sizes)
     text = "Обрано: " + ", ".join(map(str, sorted(selected_sizes))) if selected_sizes else "Оберіть потрібні розміри:"
-    await query.edit_message_text(text=text, reply_markup=keyboard)
+    await query.edit_message_caption(caption=text, reply_markup=keyboard)
     return EDITING_SIZES
 
 
