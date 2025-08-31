@@ -1116,7 +1116,7 @@ async def edit_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data['current_product_id'] = product_id
     context.user_data['message_to_edit_id'] = query.message.message_id
 
-    await query.message.reply_text("Введіть нову ціну:")
+    await query.edit_message_caption(caption="Введіть нову ціну:", reply_markup=None)
     return ENTERING_NEW_PRICE
 
 
@@ -1137,6 +1137,31 @@ async def receive_new_price(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return ConversationHandler.END
 
     update_product_price(product_id, new_price)
+
+    # Обновляем пост в основном канале
+    product = get_product_by_id(product_id)
+    if product and product['message_id']:
+        try:
+            insole_lengths = json.loads(product['insole_lengths_json']) if product['insole_lengths_json'] else {}
+            sizes_list = [int(s) for s in product['sizes'].split(',') if s.isdigit()]
+            formatted_sizes = [f"<b>{s}</b> ({insole_lengths.get(str(s))} см)" if insole_lengths.get(str(s)) else f"<b>{s}</b>" for s in sorted(sizes_list)]
+            sizes_for_caption = ", ".join(formatted_sizes)
+            channel_caption = (f"Натуральна шкіра\n"
+                               f"{sizes_for_caption} розмір\n"
+                               f"{product['price']} грн наявність")
+            channel_keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🛒 Купити", url=f"https://t.me/{BOT_USERNAME}?start=buy_{product['id']}")]])
+
+            await context.bot.edit_message_caption(
+                chat_id=CHANNEL_ID,
+                message_id=product['message_id'],
+                caption=channel_caption,
+                reply_markup=channel_keyboard,
+                parse_mode='HTML'
+            )
+        except Exception as e:
+            print(f"Error updating channel post after price edit: {e}")
+
     product = get_product_by_id(product_id)
 
     new_caption = f"Ціна: {product['price']} грн.\nРозміри в наявності: {product['sizes']}"
