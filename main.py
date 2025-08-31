@@ -394,8 +394,9 @@ async def checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     summary_lines = []
     total_price = 0
+    keyboard_rows = []
 
-    for item in cart:
+    for index, item in enumerate(cart):
         product_id = item['product_id']
         size = item['size']
         product = get_product_by_id(product_id)
@@ -406,17 +407,44 @@ async def checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             price = product['price']
             summary_lines.append(f"• {product_name}, розмір {size} - {price} грн")
             total_price += price
+
+            button_text = f"❌ {product_name}, розмір {size} - {price} грн"
+            keyboard_rows.append([
+                InlineKeyboardButton(button_text, callback_data=f"remove_item_{index}")
+            ])
         else:
             summary_lines.append(f"• Невідомий товар (ID: {product_id}), розмір {size} - помилка")
 
     summary_text = "🛒 <b>Ваше замовлення:</b>\n\n" + "\n".join(summary_lines)
     summary_text += f"\n\n💰 <b>Загальна сума: {total_price} грн</b>"
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Перейти до оплати", callback_data='proceed_to_payment')]
-    ])
-
+    keyboard_rows.append([InlineKeyboardButton("💳 Перейти до оплати", callback_data='proceed_to_payment')])
+    keyboard = InlineKeyboardMarkup(keyboard_rows)
     await query.edit_message_text(text=summary_text, reply_markup=keyboard, parse_mode='HTML')
+
+
+async def remove_item_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Удаляет товар из корзины и обновляет сообщение с корзиной."""
+    query = update.callback_query
+    await query.answer()
+
+    # Извлекаем индекс из callback_data (формат: remove_item_{index})
+    try:
+        index_to_remove = int(query.data.split('_')[2])
+    except (IndexError, ValueError):
+        await query.message.reply_text("Помилка: Некоректні дані для видалення.")
+        return
+
+    cart = context.user_data.get('cart', [])
+    if not cart or index_to_remove >= len(cart):
+        await checkout_callback(update, context)
+        return
+
+    # Удаляем товар из корзины
+    del context.user_data['cart'][index_to_remove]
+
+    # "Перерисовываем" корзину, вызывая существующую функцию
+    await checkout_callback(update, context)
 
 
 async def proceed_to_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1654,6 +1682,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(back_to_catalog_callback, pattern='^back_to_catalog_'))
     application.add_handler(CallbackQueryHandler(size_callback, pattern='^ps_'))
     application.add_handler(CallbackQueryHandler(checkout_callback, pattern='^checkout$'))
+    application.add_handler(CallbackQueryHandler(remove_item_callback, pattern='^remove_item_'))
     application.add_handler(CallbackQueryHandler(proceed_to_payment_callback, pattern='^proceed_to_payment$'))
     application.add_handler(CallbackQueryHandler(confirm_order_callback, pattern='^confirm_cart_'))
     application.add_handler(CallbackQueryHandler(search_page_callback, pattern='^search_page_'))
