@@ -18,9 +18,9 @@ from config import (ADMIN_IDS, BOT_USERNAME, CHANNEL_ID, INSOLE_LENGTH_MAP,
 from database import (add_product, get_all_products, get_products_by_size, get_product_by_id, init_db,
                       set_product_sold, update_message_id, update_product_price,
                       update_product_sizes,
-                      delete_product_by_id, add_faq, get_all_faq,
-                      delete_faq_by_id, find_faq_by_keywords, get_chat_by_user_id,
-                      set_chat_status, delete_chat)
+                      delete_product_by_id, add_faq, get_all_faq, delete_faq_by_id,
+                      find_faq_by_keywords, get_chat_by_user_id, set_chat_status,
+                      delete_chat, add_message_to_history, get_history_for_user)
 
 # Включаем логирование
 logging.basicConfig(
@@ -41,6 +41,13 @@ WAITING_FOR_ACTION = 14
 GETTING_KEYWORDS, GETTING_ANSWER = range(15, 17)
 
 
+async def reply_and_log(update: Update, text: str, **kwargs):
+    """Отправляет ответ пользователю и логирует его в историю."""
+    await update.message.reply_text(text, **kwargs)
+    if update.effective_user:
+        add_message_to_history(user_id=update.effective_user.id, message_text=text, sender_type='bot')
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Обрабатывает команду /start.
@@ -59,7 +66,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                 product_id = int(parts[1])
                 selected_size = parts[2]
             except (IndexError, ValueError):
-                await update.message.reply_text("Некоректне посилання для покупки.")
+                await reply_and_log(update, "Некоректне посилання для покупки.")
                 return ConversationHandler.END
 
             product = get_product_by_id(product_id)
@@ -98,7 +105,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             try:
                 product_id = int(parts[1])
             except (IndexError, ValueError):
-                await update.message.reply_text("Некоректне посилання для покупки.")
+                await reply_and_log(update, "Некоректне посилання для покупки.")
                 return ConversationHandler.END
 
             product = get_product_by_id(product_id)
@@ -133,15 +140,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             reply_markup = InlineKeyboardMarkup(keyboard)
             await context.bot.send_message(chat_id=user_id, text="Оберіть ваш розмір:", reply_markup=reply_markup)
         else:
-            await update.message.reply_text("Некоректне посилання для покупки.")
+            await reply_and_log(update, "Некоректне посилання для покупки.")
         return ConversationHandler.END
     elif args and args[0] == 'find_size':
-        await update.message.reply_text("Введіть розмір для пошуку:")
+        await reply_and_log(update, "Введіть розмір для пошуку:")
         return AWAITING_SIZE_SEARCH
     else:
         keyboard = [[InlineKeyboardButton("Пошук за розміром", callback_data='start_find_size')]]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
+        await reply_and_log(update,
             "Привіт! Я бот для продажу взуття.\n\n"
             "Натисніть кнопку, щоб знайти пару за вашим розміром.",
             reply_markup=reply_markup)
@@ -150,9 +157,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает диалог добавления товара и запрашивает фото."""
     if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        await reply_and_log(update, "Ця команда доступна лише адміністратору.")
         return ConversationHandler.END
-    await update.message.reply_text("Завантажте фотографію товару.")
+    await reply_and_log(update, "Завантажте фотографію товару.")
     return PHOTO
 
 
@@ -170,7 +177,7 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data['selected_sizes'] = []
 
     keyboard = create_sizes_keyboard([])
-    await update.message.reply_text("Медіафайл отримано. Оберіть потрібні розміри:",
+    await reply_and_log(update, "Медіафайл отримано. Оберіть потрібні розміри:",
                                     reply_markup=keyboard)
     return SELECTING_SIZES
 
@@ -240,7 +247,7 @@ async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Обрабатывает цену, публикует товар в канал и завершает диалог."""
     price_text = update.message.text
     if not price_text.isdigit():
-        await update.message.reply_text("Будь ласка, введіть коректну ціну у вигляді числа.")
+        await reply_and_log(update, "Будь ласка, введіть коректну ціну у вигляді числа.")
         return ENTERING_PRICE
 
     context.user_data['price'] = int(price_text)
@@ -291,7 +298,7 @@ async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Сохраняем message_id в базу
     update_message_id(product_id, sent_message.message_id)
 
-    await update.message.reply_text("Товар успішно додано та опубліковано в каналі.")
+    await reply_and_log(update, "Товар успішно додано та опубліковано в каналі.")
     return ConversationHandler.END
 
 
@@ -300,7 +307,7 @@ async def show_catalog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     products = get_all_products()
 
     if not products:
-        await update.message.reply_text("Каталог поки що порожній.")
+        await reply_and_log(update, "Каталог поки що порожній.")
         return
 
     for product in products:
@@ -649,7 +656,7 @@ async def proof_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if file_id:
         context.user_data['proof_file_id'] = file_id
 
-    await update.message.reply_text(
+    await reply_and_log(update,
         "Дякуємо! Ваше підтвердження отримано. "
         "Будь ласка, введіть Ваше ПІБ (прізвище, ім'я, по батькові)."
     )
@@ -659,14 +666,14 @@ async def proof_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Сохраняет ФИО и запрашивает номер телефона."""
     context.user_data['full_name'] = update.message.text
-    await update.message.reply_text("Введіть Ваш номер телефону.")
+    await reply_and_log(update, "Введіть Ваш номер телефону.")
     return AWAITING_PHONE
 
 
 async def phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Сохраняет телефон и запрашивает город."""
     context.user_data['phone_number'] = update.message.text
-    await update.message.reply_text("Введіть Ваше місто.")
+    await reply_and_log(update, "Введіть Ваше місто.")
     return AWAITING_CITY
 
 
@@ -677,7 +684,7 @@ async def city_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         [InlineKeyboardButton("Нова Пошта", callback_data='delivery_np')],
         [InlineKeyboardButton("Укрпошта", callback_data='delivery_up')]
     ])
-    await update.message.reply_text("Оберіть спосіб доставки:", reply_markup=keyboard)
+    await reply_and_log(update, "Оберіть спосіб доставки:", reply_markup=keyboard)
     return AWAITING_DELIVERY_CHOICE
 
 
@@ -708,7 +715,7 @@ async def delivery_details_received(update: Update, context: ContextTypes.DEFAUL
     # 1. Собрать все данные по корзине и клиенту
     cart = context.user_data.get('cart_items_for_confirmation', [])
     if not cart:
-        await update.message.reply_text("Помилка: ваш кошик порожній. Спробуйте почати спочатку.")
+        await reply_and_log(update, "Помилка: ваш кошик порожній. Спробуйте почати спочатку.")
         return ConversationHandler.END
 
     user_data = context.user_data
@@ -770,7 +777,7 @@ async def delivery_details_received(update: Update, context: ContextTypes.DEFAUL
     await context.bot.send_photo(chat_id=ORDERS_CHANNEL_ID, photo=proof_file_id, caption="Підтвердження оплати від клієнта")
     await context.bot.send_message(chat_id=ORDERS_CHANNEL_ID, text=order_details, reply_markup=keyboard, parse_mode='HTML')
 
-    await update.message.reply_text(
+    await reply_and_log(update,
         "Дякуємо! Всі дані отримано. Ваше замовлення передається менеджеру на перевірку."
     )
     context.user_data.clear()
@@ -1155,7 +1162,7 @@ async def receive_new_price(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """Получает новую цену, обновляет товар и исходное сообщение."""
     new_price_text = update.message.text
     if not new_price_text.isdigit():
-        await update.message.reply_text("Будь ласка, введіть коректну ціну у вигляді числа.")
+        await reply_and_log(update, "Будь ласка, введіть коректну ціну у вигляді числа.")
         return ENTERING_NEW_PRICE
 
     new_price = int(new_price_text)
@@ -1164,7 +1171,7 @@ async def receive_new_price(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     chat_id = update.effective_chat.id
 
     if not product_id or not message_id:
-        await update.message.reply_text("Сталася помилка, спробуйте знову.")
+        await reply_and_log(update, "Сталася помилка, спробуйте знову.")
         return ConversationHandler.END
 
     update_product_price(product_id, new_price)
@@ -1206,7 +1213,7 @@ async def receive_new_price(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await context.bot.edit_message_caption(
         chat_id=chat_id, message_id=message_id, caption=new_caption, reply_markup=keyboard
     )
-    await update.message.reply_text("✅ Ціну успішно оновлено.")
+    await reply_and_log(update, "✅ Ціну успішно оновлено.")
 
     context.user_data.pop('current_product_id', None)
     context.user_data.pop('message_to_edit_id', None)
@@ -1453,16 +1460,16 @@ async def gallery_select_callback(update: Update, context: ContextTypes.DEFAULT_
 async def show_delete_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Выводит список товаров для удаления."""
     if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        await reply_and_log(update, "Ця команда доступна лише адміністратору.")
         return
 
     products = get_all_products()
 
     if not products:
-        await update.message.reply_text("У каталозі немає товарів для видалення.")
+        await reply_and_log(update, "У каталозі немає товарів для видалення.")
         return
 
-    await update.message.reply_text("Оберіть товар, який хочете видалити:")
+    await reply_and_log(update, "Оберіть товар, який хочете видалити:")
     for product in products:
         caption = f"ID: {product['id']}\nЦіна: {product['price']} грн.\nРозміри: {product['sizes']}"
         keyboard = InlineKeyboardMarkup(
@@ -1527,9 +1534,9 @@ async def cancel_delete_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def set_details_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает диалог смены реквизитов."""
     if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        await reply_and_log(update, "Ця команда доступна лише адміністратору.")
         return ConversationHandler.END
-    await update.message.reply_text("Надішліть новий текст з платіжними реквізитами.")
+    await reply_and_log(update, "Надішліть новий текст з платіжними реквізитами.")
     return SETTING_DETAILS
 
 
@@ -1550,35 +1557,35 @@ async def receive_details(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         with open(config_path, 'w', encoding='utf-8') as file:
             file.writelines(lines)
 
-        await update.message.reply_text("✅ Реквізити успішно оновлено.")
+        await reply_and_log(update, "✅ Реквізити успішно оновлено.")
     except Exception as e:
         print(f"Ошибка при обновлении реквизитов в config.py: {e}")
-        await update.message.reply_text("Помилка! Не вдалося зберегти нові реквізити.")
+        await reply_and_log(update, "Помилка! Не вдалося зберегти нові реквізити.")
     return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Отменяет текущий диалог."""
-    await update.message.reply_text("Дію скасовано.")
+    await reply_and_log(update, "Дію скасовано.")
     return ConversationHandler.END
 
 
 async def test_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Отправляет тестовую кнопку для отладки deep link."""
     if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        await reply_and_log(update, "Ця команда доступна лише адміністратору.")
         return
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Тестова кнопка", url=f'https://t.me/{BOT_USERNAME}?start=find_size')]
     ])
-    await update.message.reply_text('Це тестова кнопка:', reply_markup=keyboard)
+    await reply_and_log(update, 'Це тестова кнопка:', reply_markup=keyboard)
 
 
 async def create_find_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Публикует в канале пост с кнопкой для поиска по размеру."""
     if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        await reply_and_log(update, "Ця команда доступна лише адміністратору.")
         return
 
     text = "Для пошуку взуття за розміром, натисніть кнопку справа 👉"
@@ -1590,18 +1597,18 @@ async def create_find_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         sent_message = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=keyboard)
         # Закрепляем сообщение в канале с уведомлением для подписчиков
         await context.bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=sent_message.message_id, disable_notification=False)
-        await update.message.reply_text("✅ Пост с кнопкой поиска успешно опубликован и закреплен в канале.")
+        await reply_and_log(update, "✅ Пост с кнопкой поиска успешно опубликован и закреплен в канале.")
     except Exception as e:
-        await update.message.reply_text(f"Не вдалося опублікувати та закріпити пост. Помилка: {e}")
+        await reply_and_log(update, f"Не вдалося опублікувати та закріпити пост. Помилка: {e}")
 
 
 async def add_faq_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает диалог добавления записи в FAQ."""
     if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        await reply_and_log(update, "Ця команда доступна лише адміністратору.")
         return ConversationHandler.END
 
-    await update.message.reply_text(
+    await reply_and_log(update,
         "Введите ключевые слова для этого вопроса через запятую (например: доставка, новая почта, сроки)."
     )
     return GETTING_KEYWORDS
@@ -1610,7 +1617,7 @@ async def add_faq_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 async def get_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Сохраняет ключевые слова и запрашивает ответ."""
     context.user_data['faq_keywords'] = update.message.text
-    await update.message.reply_text("Отлично. Теперь введите полный текст ответа на этот вопрос.")
+    await reply_and_log(update, "Отлично. Теперь введите полный текст ответа на этот вопрос.")
     return GETTING_ANSWER
 
 
@@ -1621,7 +1628,7 @@ async def get_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     add_faq(keywords=keywords, answer=answer)
 
-    await update.message.reply_text("✅ Новая запись в базу знаний успешно добавлена.")
+    await reply_and_log(update, "✅ Новая запись в базу знаний успешно добавлена.")
 
     context.user_data.clear()
     return ConversationHandler.END
@@ -1630,13 +1637,13 @@ async def get_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def list_faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает список всех записей в FAQ с кнопками для удаления."""
     if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        await reply_and_log(update, "Ця команда доступна лише адміністратору.")
         return
 
     all_faq_entries = get_all_faq()
 
     if not all_faq_entries:
-        await update.message.reply_text("База знаний пуста.")
+        await reply_and_log(update, "База знаний пуста.")
         return
 
     for entry in all_faq_entries:
@@ -1648,7 +1655,7 @@ async def list_faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ Удалить", callback_data=f"faq_delete_{entry['id']}")]
         ])
-        await update.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
+        await reply_and_log(update, text, reply_markup=keyboard, parse_mode='HTML')
 
 
 async def delete_faq_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1699,21 +1706,52 @@ async def accept_chat_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 async def clear_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Удаляет сессию живого чата для указанного пользователя."""
     if update.effective_user.id not in ADMIN_IDS:
-        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        await reply_and_log(update, "Ця команда доступна лише адміністратору.")
         return
 
     if not context.args:
-        await update.message.reply_text("Пожалуйста, укажите ID пользователя. Пример: /clear_chat 12345678")
+        await reply_and_log(update, "Пожалуйста, укажите ID пользователя. Пример: /clear_chat 12345678")
         return
 
     try:
         user_id = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("ID пользователя должен быть числом.")
+        await reply_and_log(update, "ID пользователя должен быть числом.")
         return
 
     delete_chat(user_id=user_id)
-    await update.message.reply_text(f"✅ Сессия чата для пользователя с ID {user_id} была успешно удалена.")
+    await reply_and_log(update, f"✅ Сессия чата для пользователя с ID {user_id} была успешно удалена.")
+
+
+async def get_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает историю сообщений для указанного пользователя."""
+    if update.effective_user.id not in ADMIN_IDS:
+        await reply_and_log(update, "Ця команда доступна лише адміністратору.")
+        return
+
+    if not context.args:
+        await reply_and_log(update, "Пожалуйста, укажите ID пользователя. Пример: /get_history 12345678")
+        return
+
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        await reply_and_log(update, "ID пользователя должен быть числом.")
+        return
+
+    history_records = get_history_for_user(user_id=user_id)
+
+    if not history_records:
+        await reply_and_log(update, f"История сообщений для пользователя {user_id} пуста.")
+        return
+
+    formatted_lines = []
+    for record in reversed(history_records):
+        sender = 'Бот' if record['sender_type'] == 'bot' else 'Клиент'
+        formatted_lines.append(f"<b>{sender}:</b> {record['message_text']}")
+
+    response_text = f"📜 <b>История последних сообщений для {user_id}:</b>\n\n" + "\n\n".join(formatted_lines)
+    await reply_and_log(update, response_text, parse_mode='HTML')
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1721,10 +1759,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Обрабатывает текстовые сообщения, ищет ответы в FAQ.
     Если ответ не найден, создает запрос на "живой" чат.
     """
+    add_message_to_history(user_id=update.effective_user.id, message_text=update.message.text, sender_type='user')
     user_message = update.message.text
     answer = find_faq_by_keywords(user_message)
     if answer:
-        await update.message.reply_text(answer)
+        await reply_and_log(update, answer)
     else:
         user = update.effective_user
         chat_session = get_chat_by_user_id(user.id)
@@ -1841,6 +1880,7 @@ def main() -> None:
     application.add_handler(CommandHandler("delete", show_delete_list))
     application.add_handler(CommandHandler('list_faq', list_faq))
     application.add_handler(CommandHandler('clear_chat', clear_chat_command))
+    application.add_handler(CommandHandler('get_history', get_history_command))
     application.add_handler(CallbackQueryHandler(delete_faq_callback, pattern='^faq_delete_'))
     application.add_handler(CallbackQueryHandler(accept_chat_callback, pattern='^accept_chat_'))
     application.add_handler(CommandHandler("testbutton", test_button))

@@ -42,6 +42,16 @@ def init_db():
         )
     ''')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS message_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            message_text TEXT NOT NULL,
+            sender_type TEXT NOT NULL,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
@@ -267,3 +277,34 @@ def delete_chat(user_id: int):
     cursor.execute("DELETE FROM live_chats WHERE user_id = ?", (user_id,))
     conn.commit()
     conn.close()
+
+
+def add_message_to_history(user_id: int, message_text: str, sender_type: str):
+    """
+    Добавляет одно сообщение в историю переписки.
+    sender_type может быть 'user' или 'bot'.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO message_history (user_id, message_text, sender_type) VALUES (?, ?, ?)",
+        (user_id, message_text, sender_type)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_history_for_user(user_id: int, limit: int = 5) -> list:
+    """
+    Получает последние 'limit' сообщений для указанного пользователя.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT sender_type, message_text FROM message_history WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+        (user_id, limit)
+    )
+    history = cursor.fetchall()
+    conn.close()
+    return history
