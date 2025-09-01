@@ -229,3 +229,41 @@ def get_all_faq() -> list:
     all_faqs = cursor.fetchall()
     conn.close()
     return all_faqs
+
+
+def set_chat_status(user_id: int, status: str, admin_id: int = None):
+    """
+    Создает или обновляет запись о чате для конкретного пользователя.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR REPLACE INTO live_chats (user_id, status, admin_id, last_update) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+        (user_id, status, admin_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_chat_by_user_id(user_id: int):
+    """
+    Получает информацию о чате по user_id.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM live_chats WHERE user_id = ?", (user_id,))
+    chat_info = cursor.fetchone()
+    conn.close()
+    return chat_info
+
+
+def delete_chat(user_id: int):
+    """
+    Удаляет запись о чате по user_id.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM live_chats WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()

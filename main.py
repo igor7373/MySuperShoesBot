@@ -19,7 +19,8 @@ from database import (add_product, get_all_products, get_products_by_size, get_p
                       set_product_sold, update_message_id, update_product_price,
                       update_product_sizes,
                       delete_product_by_id, add_faq, get_all_faq,
-                      delete_faq_by_id, find_faq_by_keywords)
+                      delete_faq_by_id, find_faq_by_keywords, get_chat_by_user_id,
+                      set_chat_status, delete_chat)
 
 # Включаем логирование
 logging.basicConfig(
@@ -1663,14 +1664,89 @@ async def delete_faq_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text("Ошибка: неверный ID для удаления.")
 
 
+async def accept_chat_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает нажатие на кнопку 'Взять в работу'."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        user_id = int(query.data.split('_')[2])
+        admin_id = query.from_user.id
+        user_info = await context.bot.get_chat(user_id)
+    except (IndexError, ValueError):
+        await query.edit_message_text("Ошибка: неверный ID пользователя в callback_data.")
+        return
+
+    chat_session = get_chat_by_user_id(user_id)
+
+    if chat_session and chat_session['status'] == 'waiting':
+        set_chat_status(user_id=user_id, status='in_progress', admin_id=admin_id)
+        new_text_for_admin = (
+            f"✅ Вы приняли диалог с пользователем {user_info.full_name} в работу.\n\n"
+            "Теперь все ваши сообщения боту (без команд) будут пересылаться ему.\n\n"
+            f"Для завершения диалога используйте команду /endchat {user_id}"
+        )
+        await query.edit_message_text(text=new_text_for_admin, reply_markup=None)
+        await context.bot.send_message(
+            chat_id=user_id, text="До вашого діалогу підключився менеджер. Будь ласка, очікуйте на відповідь."
+        )
+    else:
+        await query.edit_message_text(
+            text=f"⚠️ Диалог с пользователем {user_info.full_name} уже был взят в работу другим администратором.", reply_markup=None
+        )
+
+
+async def clear_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет сессию живого чата для указанного пользователя."""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Пожалуйста, укажите ID пользователя. Пример: /clear_chat 12345678")
+        return
+
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("ID пользователя должен быть числом.")
+        return
+
+    delete_chat(user_id=user_id)
+    await update.message.reply_text(f"✅ Сессия чата для пользователя с ID {user_id} была успешно удалена.")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Обрабатывает текстовые сообщения, ищет ответы в FAQ.
+    Если ответ не найден, создает запрос на "живой" чат.
     """
     user_message = update.message.text
     answer = find_faq_by_keywords(user_message)
     if answer:
         await update.message.reply_text(answer)
+    else:
+        user = update.effective_user
+        chat_session = get_chat_by_user_id(user.id)
+
+        if not chat_session:
+            set_chat_status(user_id=user.id, status='waiting')
+
+            user_mention = user.mention_html()
+            text_for_admin = (
+                f"🚨 Новый вопрос от пользователя {user_mention} (ID: <code>{user.id}</code>)\n\n"
+                f"<b>Текст вопроса:</b>\n"
+                f"{update.message.text}"
+            )
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Взять в работу", callback_data=f"accept_chat_{user.id}")]
+            ])
+
+            for admin_id in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(chat_id=admin_id, text=text_for_admin, reply_markup=keyboard, parse_mode='HTML')
+                except Exception as e:
+                    logging.warning(f"Не удалось отправить уведомление админу {admin_id}: {e}")
 
 
 def main() -> None:
@@ -1764,7 +1840,9 @@ def main() -> None:
     application.add_handler(CommandHandler("catalog", show_catalog))
     application.add_handler(CommandHandler("delete", show_delete_list))
     application.add_handler(CommandHandler('list_faq', list_faq))
+    application.add_handler(CommandHandler('clear_chat', clear_chat_command))
     application.add_handler(CallbackQueryHandler(delete_faq_callback, pattern='^faq_delete_'))
+    application.add_handler(CallbackQueryHandler(accept_chat_callback, pattern='^accept_chat_'))
     application.add_handler(CommandHandler("testbutton", test_button))
     application.add_handler(CommandHandler('createbuttonpost', create_find_post))
     application.add_handler(CallbackQueryHandler(delete_callback, pattern='^del_'))
