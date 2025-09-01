@@ -308,3 +308,16 @@ def get_history_for_user(user_id: int, limit: int = 5) -> list:
     history = cursor.fetchall()
     conn.close()
     return history
+
+
+def get_chat_by_admin_id(admin_id: int):
+    """
+    Находит активный чат ('in_progress') по ID администратора.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM live_chats WHERE admin_id = ? AND status = 'in_progress'", (admin_id,))
+    chat_info = cursor.fetchone()
+    conn.close()
+    return chat_info

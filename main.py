@@ -18,9 +18,9 @@ from config import (ADMIN_IDS, BOT_USERNAME, CHANNEL_ID, INSOLE_LENGTH_MAP,
 from database import (add_product, get_all_products, get_products_by_size, get_product_by_id, init_db,
                       set_product_sold, update_message_id, update_product_price,
                       update_product_sizes,
-                      delete_product_by_id, add_faq, get_all_faq, delete_faq_by_id,
-                      find_faq_by_keywords, get_chat_by_user_id, set_chat_status,
-                      delete_chat, add_message_to_history, get_history_for_user)
+                      delete_product_by_id, add_faq, get_all_faq, delete_faq_by_id, find_faq_by_keywords,
+                      get_chat_by_user_id, set_chat_status, delete_chat,
+                      add_message_to_history, get_history_for_user, get_chat_by_admin_id)
 
 # Включаем логирование
 logging.basicConfig(
@@ -1754,11 +1754,44 @@ async def get_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await reply_and_log(update, response_text, parse_mode='HTML')
 
 
+async def end_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Завершает активный живой чат с пользователем."""
+    admin_id = update.effective_user.id
+    if admin_id not in ADMIN_IDS:
+        await reply_and_log(update, "Ця команда доступна лише адміністратору.")
+        return
+
+    active_chat = get_chat_by_admin_id(admin_id)
+
+    if active_chat:
+        user_id = active_chat['user_id']
+        delete_chat(user_id=user_id)
+        await reply_and_log(update, f"✅ Вы успешно завершили диалог с пользователем {user_id}.")
+
+        client_message = "Менеджер завершив діалог. Якщо у вас є нові питання, просто напишіть їх у цей чат."
+        await context.bot.send_message(chat_id=user_id, text=client_message)
+        add_message_to_history(user_id, "Менеджер завершив діалог...", 'bot')
+    else:
+        await reply_and_log(update, "У вас нет активных диалогов для завершения.")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Обрабатывает текстовые сообщения, ищет ответы в FAQ.
     Если ответ не найден, создает запрос на "живой" чат.
+    Также пересылает сообщения от админа к клиенту в активном чате.
     """
+    # Проверяем, не является ли отправитель админом в активном чате
+    admin_id = update.effective_user.id
+    if admin_id in ADMIN_IDS:
+        active_chat = get_chat_by_admin_id(admin_id)
+        if active_chat:
+            user_id = active_chat['user_id']
+            message_text = update.message.text
+            await context.bot.send_message(chat_id=user_id, text=message_text)
+            add_message_to_history(user_id=user_id, message_text=message_text, sender_type='bot')
+            return
+
     add_message_to_history(user_id=update.effective_user.id, message_text=update.message.text, sender_type='user')
     user_message = update.message.text
     answer = find_faq_by_keywords(user_message)
@@ -1886,6 +1919,7 @@ def main() -> None:
     application.add_handler(CommandHandler("delete", show_delete_list))
     application.add_handler(CommandHandler('list_faq', list_faq))
     application.add_handler(CommandHandler('clear_chat', clear_chat_command))
+    application.add_handler(CommandHandler('endchat', end_chat_command))
     application.add_handler(CommandHandler('get_history', get_history_command))
     application.add_handler(CallbackQueryHandler(delete_faq_callback, pattern='^faq_delete_'))
     application.add_handler(CallbackQueryHandler(accept_chat_callback, pattern='^accept_chat_'))
