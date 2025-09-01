@@ -19,7 +19,7 @@ from database import (add_product, get_all_products, get_products_by_size, get_p
                       set_product_sold, update_message_id, update_product_price,
                       update_product_sizes,
                       delete_product_by_id, add_faq, get_all_faq,
-                      delete_faq_by_id)
+                      delete_faq_by_id, find_faq_by_keywords)
 
 # Включаем логирование
 logging.basicConfig(
@@ -1663,6 +1663,16 @@ async def delete_faq_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text("Ошибка: неверный ID для удаления.")
 
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Обрабатывает текстовые сообщения, ищет ответы в FAQ.
+    """
+    user_message = update.message.text
+    answer = find_faq_by_keywords(user_message)
+    if answer:
+        await update.message.reply_text(answer)
+
+
 def main() -> None:
     """Основная функция для запуска бота."""
     init_db()
@@ -1773,6 +1783,9 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_order_status_callback, pattern='^status_'))
     # Обработчик для отправки ТТН
     application.add_handler(MessageHandler(filters.REPLY & filters.Chat(chat_id=DISPATCH_CHANNEL_ID), handle_ttn_reply))
+
+    # Этот обработчик должен быть последним, чтобы не перехватывать сообщения для диалогов
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     application.run_polling()
 
