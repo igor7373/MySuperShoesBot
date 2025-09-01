@@ -25,6 +25,23 @@ def init_db():
     if 'insole_lengths_json' not in columns:
         cursor.execute("ALTER TABLE products ADD COLUMN insole_lengths_json TEXT")
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS faq (
+            id INTEGER PRIMARY KEY,
+            keywords TEXT NOT NULL,
+            answer TEXT NOT NULL
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS live_chats (
+            user_id INTEGER PRIMARY KEY,
+            admin_id INTEGER,
+            status TEXT NOT NULL,
+            last_update TIMESTAMP
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
@@ -154,3 +171,61 @@ def delete_product_by_id(product_id: int):
     cursor.execute("DELETE FROM products WHERE id = ?", (product_id,))
     conn.commit()
     conn.close()
+
+
+def add_faq(keywords: str, answer: str) -> int:
+    """
+    Добавляет новую запись в таблицу FAQ и возвращает ее ID.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO faq (keywords, answer) VALUES (?, ?)", (keywords, answer))
+    faq_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return faq_id
+
+
+def delete_faq_by_id(faq_id: int):
+    """
+    Удаляет запись из таблицы FAQ по ее ID.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM faq WHERE id = ?", (faq_id,))
+    conn.commit()
+    conn.close()
+
+
+def find_faq_by_keywords(user_message: str) -> str | None:
+    """
+    Ищет ответ в FAQ по ключевым словам в сообщении пользователя.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT keywords, answer FROM faq")
+    all_faqs = cursor.fetchall()
+    conn.close()
+
+    lower_user_message = user_message.lower()
+
+    for faq_item in all_faqs:
+        keywords = [kw.strip().lower() for kw in faq_item['keywords'].split(',')]
+        if any(keyword in lower_user_message for keyword in keywords if keyword):
+            return faq_item['answer']
+
+    return None
+
+
+def get_all_faq() -> list:
+    """
+    Возвращает список всех записей из таблицы FAQ.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, keywords, answer FROM faq")
+    all_faqs = cursor.fetchall()
+    conn.close()
+    return all_faqs

@@ -18,7 +18,8 @@ from config import (ADMIN_IDS, BOT_USERNAME, CHANNEL_ID, INSOLE_LENGTH_MAP,
 from database import (add_product, get_all_products, get_products_by_size, get_product_by_id, init_db,
                       set_product_sold, update_message_id, update_product_price,
                       update_product_sizes,
-                      delete_product_by_id)
+                      delete_product_by_id, add_faq, get_all_faq,
+                      delete_faq_by_id)
 
 # Включаем логирование
 logging.basicConfig(
@@ -36,6 +37,7 @@ ENTERING_NEW_PRICE = 11
 EDITING_SIZES = 12
 AWAITING_SIZE_SEARCH = 13
 WAITING_FOR_ACTION = 14
+GETTING_KEYWORDS, GETTING_ANSWER = range(15, 17)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1592,6 +1594,75 @@ async def create_find_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(f"Не вдалося опублікувати та закріпити пост. Помилка: {e}")
 
 
+async def add_faq_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начинает диалог добавления записи в FAQ."""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        "Введите ключевые слова для этого вопроса через запятую (например: доставка, новая почта, сроки)."
+    )
+    return GETTING_KEYWORDS
+
+
+async def get_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сохраняет ключевые слова и запрашивает ответ."""
+    context.user_data['faq_keywords'] = update.message.text
+    await update.message.reply_text("Отлично. Теперь введите полный текст ответа на этот вопрос.")
+    return GETTING_ANSWER
+
+
+async def get_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сохраняет ответ, добавляет запись в БД и завершает диалог."""
+    keywords = context.user_data.get('faq_keywords')
+    answer = update.message.text
+
+    add_faq(keywords=keywords, answer=answer)
+
+    await update.message.reply_text("✅ Новая запись в базу знаний успешно добавлена.")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def list_faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает список всех записей в FAQ с кнопками для удаления."""
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("Ця команда доступна лише адміністратору.")
+        return
+
+    all_faq_entries = get_all_faq()
+
+    if not all_faq_entries:
+        await update.message.reply_text("База знаний пуста.")
+        return
+
+    for entry in all_faq_entries:
+        text = (
+            f"<b>ID:</b> {entry['id']}\n\n"
+            f"<b>Ключевые слова:</b> {entry['keywords']}\n\n"
+            f"<b>Ответ:</b> {entry['answer']}"
+        )
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ Удалить", callback_data=f"faq_delete_{entry['id']}")]
+        ])
+        await update.message.reply_text(text, reply_markup=keyboard, parse_mode='HTML')
+
+
+async def delete_faq_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет запись из FAQ по ID."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        faq_id = int(query.data.split('_')[2])
+        delete_faq_by_id(faq_id)
+        await query.edit_message_text(text="✅ Запись успешно удалена.", reply_markup=None)
+    except (IndexError, ValueError):
+        await query.edit_message_text("Ошибка: неверный ID для удаления.")
+
+
 def main() -> None:
     """Основная функция для запуска бота."""
     init_db()
@@ -1649,6 +1720,15 @@ def main() -> None:
         fallbacks=[CommandHandler('cancel', cancel)],
     )
 
+    add_faq_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('add_faq', add_faq_start)],
+        states={
+            GETTING_KEYWORDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_keywords)],
+            GETTING_ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_answer)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+    )
+
     find_size_conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler('start', start),
@@ -1663,6 +1743,7 @@ def main() -> None:
         per_chat=False,
     )
 
+    application.add_handler(add_faq_conv_handler)
     application.add_handler(details_conv_handler)
     application.add_handler(edit_price_conv_handler)
     application.add_handler(edit_sizes_conv_handler)
@@ -1672,6 +1753,8 @@ def main() -> None:
     application.add_handler(payment_conv_handler)
     application.add_handler(CommandHandler("catalog", show_catalog))
     application.add_handler(CommandHandler("delete", show_delete_list))
+    application.add_handler(CommandHandler('list_faq', list_faq))
+    application.add_handler(CallbackQueryHandler(delete_faq_callback, pattern='^faq_delete_'))
     application.add_handler(CommandHandler("testbutton", test_button))
     application.add_handler(CommandHandler('createbuttonpost', create_find_post))
     application.add_handler(CallbackQueryHandler(delete_callback, pattern='^del_'))
