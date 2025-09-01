@@ -1768,7 +1768,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         chat_session = get_chat_by_user_id(user.id)
 
-        if not chat_session:
+        if chat_session:
+            if chat_session['status'] == 'in_progress':
+                admin_id = chat_session['admin_id']
+                text_to_forward = f"💬 Новое сообщение от {user.full_name}:\n\n{update.message.text}"
+                await context.bot.send_message(chat_id=admin_id, text=text_to_forward)
+        else:
+            # Если сессии нет, создаем новую и уведомляем админов
             set_chat_status(user_id=user.id, status='waiting')
 
             user_mention = user.mention_html()
