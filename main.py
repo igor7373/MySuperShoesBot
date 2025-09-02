@@ -1593,8 +1593,37 @@ async def receive_details(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отменяет текущий диалог."""
-    await reply_and_log(update, "Дію скасовано.")
+    """Отменяет текущий диалог, корректно обрабатывая команду и таймаут."""
+    cancel_message = "Дію скасовано."
+    user_id = None
+
+    # Пытаемся определить ID пользователя для логирования
+    if update and update.effective_user:
+        user_id = update.effective_user.id
+    elif context._user_id:
+        user_id = context._user_id
+
+    # Если есть сообщение (команда /cancel), отвечаем на него
+    if update and update.message:
+        await update.message.reply_text(text=cancel_message)
+    # Если сообщения нет (таймаут), просто отправляем в чат
+    elif user_id:
+        await context.bot.send_message(chat_id=user_id, text=cancel_message)
+
+    # Логируем, если удалось определить пользователя
+    if user_id:
+        add_message_to_history(user_id=user_id, message_text=cancel_message, sender_type='bot')
+
+    return ConversationHandler.END
+
+
+async def handle_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Уведомляет пользователя о таймауте и завершает диалог."""
+    user_id = context._user_id
+    cancel_message = "Дію скасовано через час очікування."
+    if user_id:
+        await context.bot.send_message(chat_id=user_id, text=cancel_message)
+        add_message_to_history(user_id=user_id, message_text=cancel_message, sender_type='bot')
     return ConversationHandler.END
 
 
@@ -1923,8 +1952,10 @@ def main() -> None:
             PHOTO: [MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.IMAGE, photo_received)],
             SELECTING_SIZES: [CallbackQueryHandler(select_size_callback)],
             ENTERING_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, price_received)],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, handle_timeout)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
+        conversation_timeout=120,
     )
 
     payment_conv_handler = ConversationHandler(
@@ -1940,33 +1971,41 @@ def main() -> None:
             AWAITING_DELIVERY_CHOICE: [CallbackQueryHandler(delivery_choice_callback)],
             AWAITING_NP_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, delivery_details_received)],
             AWAITING_UP_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, delivery_details_received)],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, handle_timeout)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
-        allow_reentry=True
+        allow_reentry=True,
+        conversation_timeout=120,
     )
 
     details_conv_handler = ConversationHandler(
         entry_points=[CommandHandler('set_details', set_details_start)],
         states={
             SETTING_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_details)],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, handle_timeout)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
+        conversation_timeout=120,
     )
 
     edit_price_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(edit_price_start, pattern='^edit_price_')],
         states={
             ENTERING_NEW_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_new_price)],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, handle_timeout)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
+        conversation_timeout=120,
     )
 
     edit_sizes_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(edit_sizes_start, pattern='^edit_sizes_')],
         states={
             EDITING_SIZES: [CallbackQueryHandler(edit_sizes_callback)],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, handle_timeout)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
+        conversation_timeout=120,
     )
 
     add_faq_conv_handler = ConversationHandler(
@@ -1974,8 +2013,10 @@ def main() -> None:
         states={
             GETTING_KEYWORDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_keywords)],
             GETTING_ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_answer)],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, handle_timeout)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
+        conversation_timeout=120,
     )
 
     find_size_conv_handler = ConversationHandler(
@@ -1987,9 +2028,11 @@ def main() -> None:
         states={
             WAITING_FOR_ACTION: [CallbackQueryHandler(find_size_start, pattern='^start_find_size$')],
             AWAITING_SIZE_SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, size_search_received)],
+            ConversationHandler.TIMEOUT: [MessageHandler(filters.ALL, handle_timeout)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
         per_chat=False,
+        conversation_timeout=120,
     )
 
     application.add_handler(add_faq_conv_handler)
