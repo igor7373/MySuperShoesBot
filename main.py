@@ -19,8 +19,9 @@ from database import (add_product, get_all_products, get_products_by_size, get_p
                       set_product_sold, update_message_id, update_product_price,
                       update_product_sizes,
                       delete_product_by_id, add_faq, get_all_faq, delete_faq_by_id, find_faq_by_keywords,
-                      get_chat_by_user_id, set_chat_status, delete_chat,
-                      add_message_to_history, get_history_for_user, get_chat_by_admin_id)
+                      get_chat_by_user_id, set_chat_status, delete_chat, add_message_to_history,
+                      get_history_for_user, get_chat_by_admin_id, add_or_update_customer,
+                      create_order, add_item_to_order)
 
 # Включаем логирование
 logging.basicConfig(
@@ -245,6 +246,7 @@ async def select_size_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def price_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обрабатывает цену, публикует товар в канал и завершает диалог."""
+    add_message_to_history(user_id=update.effective_user.id, message_text=update.message.text, sender_type='user')
     price_text = update.message.text
     if not price_text.isdigit():
         await reply_and_log(update, "Будь ласка, введіть коректну ціну у вигляді числа.")
@@ -665,6 +667,7 @@ async def proof_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Сохраняет ФИО и запрашивает номер телефона."""
+    add_message_to_history(user_id=update.effective_user.id, message_text=update.message.text, sender_type='user')
     context.user_data['full_name'] = update.message.text
     await reply_and_log(update, "Введіть Ваш номер телефону.")
     return AWAITING_PHONE
@@ -672,6 +675,7 @@ async def name_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Сохраняет телефон и запрашивает город."""
+    add_message_to_history(user_id=update.effective_user.id, message_text=update.message.text, sender_type='user')
     context.user_data['phone_number'] = update.message.text
     await reply_and_log(update, "Введіть Ваше місто.")
     return AWAITING_CITY
@@ -679,6 +683,7 @@ async def phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def city_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Сохраняет город и предлагает выбрать способ доставки."""
+    add_message_to_history(user_id=update.effective_user.id, message_text=update.message.text, sender_type='user')
     context.user_data['city'] = update.message.text
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Нова Пошта", callback_data='delivery_np')],
@@ -709,6 +714,7 @@ async def delivery_details_received(update: Update, context: ContextTypes.DEFAUL
     Сохраняет детали доставки, собирает все данные по корзине, отправляет заказ менеджеру
     и завершает диалог.
     """
+    add_message_to_history(user_id=update.effective_user.id, message_text=update.message.text, sender_type='user')
     context.user_data['delivery_final_detail'] = update.message.text
     user_id = update.effective_user.id
 
@@ -726,6 +732,26 @@ async def delivery_details_received(update: Update, context: ContextTypes.DEFAUL
     delivery_method = user_data.get('delivery_method')
     delivery_final_detail = user_data.get('delivery_final_detail')
     
+    # --- Сохранение заказа в CRM ---
+    # Шаг А: Сохранение/обновление данных о клиенте
+    add_or_update_customer(user_id=user_id, full_name=full_name, phone_number=phone_number)
+
+    # Шаг Б: Создание заказа
+    full_address = f"{city}, {delivery_method}, {delivery_final_detail}"
+    new_order_id = create_order(customer_user_id=user_id, delivery_address=full_address, status="Новый")
+
+    # Шаг В: Сохранение товаров в заказе
+    for item in cart:
+        product = get_product_by_id(item['product_id'])
+        if product:
+            add_item_to_order(
+                order_id=new_order_id,
+                product_id=item['product_id'],
+                size=str(item['size']),
+                price_at_purchase=product['price']
+            )
+    # --- Конец блока CRM ---
+
     # 2. Сформировать "карточку заказа" для менеджера
     order_items_text_lines = []
     total_price = 0
@@ -1160,6 +1186,7 @@ async def edit_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def receive_new_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Получает новую цену, обновляет товар и исходное сообщение."""
+    add_message_to_history(user_id=update.effective_user.id, message_text=update.message.text, sender_type='user')
     new_price_text = update.message.text
     if not new_price_text.isdigit():
         await reply_and_log(update, "Будь ласка, введіть коректну ціну у вигляді числа.")
@@ -1399,9 +1426,10 @@ async def display_search_page(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def size_search_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Начинает поиск по размеру и отображает первую страницу результатов."""
+    add_message_to_history(user_id=update.effective_user.id, message_text=update.message.text, sender_type='user')
     size_text = update.message.text
     if not size_text.isdigit():
-        await update.message.reply_text("Будь ласка, введіть розмір коректно у вигляді числа.")
+        await reply_and_log(update, "Будь ласка, введіть розмір коректно у вигляді числа.")
         return AWAITING_SIZE_SEARCH
 
     size = int(size_text)
@@ -1589,17 +1617,39 @@ async def create_find_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     text = "Для пошуку взуття за розміром, натисніть кнопку справа 👉"
+    if context.args:
+        phone_number = context.args[0]
+        text = f"{phone_number} менеджер"
+
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("Пошук за розміром", url=f'https://t.me/{BOT_USERNAME}?start=find_size')]
     ])
 
     try:
-        sent_message = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=keyboard)
-        # Закрепляем сообщение в канале с уведомлением для подписчиков
+        # Сначала отправляем сообщение без кнопок, чтобы обойти баг Telegram
+        sent_message = await context.bot.send_message(chat_id=CHANNEL_ID, text=text, reply_markup=None)
+        # Затем закрепляем его
         await context.bot.pin_chat_message(chat_id=CHANNEL_ID, message_id=sent_message.message_id, disable_notification=False)
+        # И только после этого редактируем, добавляя клавиатуру
+        await context.bot.edit_message_reply_markup(chat_id=CHANNEL_ID, message_id=sent_message.message_id, reply_markup=keyboard)
         await reply_and_log(update, "✅ Пост с кнопкой поиска успешно опубликован и закреплен в канале.")
     except Exception as e:
         await reply_and_log(update, f"Не вдалося опублікувати та закріпити пост. Помилка: {e}")
+
+
+async def contact_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отправляет номер телефона в ответ на нажатие кнопки 'Контакт'."""
+    query = update.callback_query
+    await query.answer()
+
+    # Извлекаем номер телефона из callback_data (формат: contact_{номер})
+    phone_number = query.data.replace('contact_', '')
+
+    # Отправляем сообщение пользователю в личный чат
+    await context.bot.send_message(
+        chat_id=query.from_user.id,
+        text=f"Наш номер для зв'язку:\n{phone_number}"
+    )
 
 
 async def add_faq_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1616,6 +1666,7 @@ async def add_faq_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def get_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Сохраняет ключевые слова и запрашивает ответ."""
+    add_message_to_history(user_id=update.effective_user.id, message_text=update.message.text, sender_type='user')
     context.user_data['faq_keywords'] = update.message.text
     await reply_and_log(update, "Отлично. Теперь введите полный текст ответа на этот вопрос.")
     return GETTING_ANSWER
@@ -1623,6 +1674,7 @@ async def get_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 async def get_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Сохраняет ответ, добавляет запись в БД и завершает диалог."""
+    add_message_to_history(user_id=update.effective_user.id, message_text=update.message.text, sender_type='user')
     keywords = context.user_data.get('faq_keywords')
     answer = update.message.text
 
@@ -1688,12 +1740,30 @@ async def accept_chat_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if chat_session and chat_session['status'] == 'waiting':
         set_chat_status(user_id=user_id, status='in_progress', admin_id=admin_id)
-        new_text_for_admin = (
-            f"✅ Вы приняли диалог с пользователем {user_info.full_name} в работу.\n\n"
-            "Теперь все ваши сообщения боту (без команд) будут пересылаться ему.\n\n"
-            f"Для завершения диалога используйте команду /endchat {user_id}"
-        )
-        await query.edit_message_text(text=new_text_for_admin, reply_markup=None)
+
+        notification_messages = context.bot_data.pop(f"chat_notifications_{user_id}", None)
+
+        if notification_messages:
+            for notif_admin_id, notif_message_id in notification_messages:
+                try:
+                    if notif_admin_id == query.from_user.id:
+                        new_text_for_admin = (
+                            f"✅ Вы приняли диалог с пользователем {user_info.full_name} в работу.\n\n"
+                            "Теперь все ваши сообщения боту (без команд) будут пересылаться ему.\n\n"
+                            f"Для завершения диалога используйте команду /endchat {user_id}"
+                        )
+                        await context.bot.edit_message_text(text=new_text_for_admin, chat_id=notif_admin_id, message_id=notif_message_id, reply_markup=None)
+                    else:
+                        text_for_other_admins = f"⚠️ Диалог с пользователем {user_info.full_name} был принят в работу другим администратором."
+                        await context.bot.edit_message_text(text=text_for_other_admins, chat_id=notif_admin_id, message_id=notif_message_id, reply_markup=None)
+                except error.BadRequest as e:
+                    if "Message is not modified" in str(e):
+                        logging.info(f"Message {notif_message_id} for admin {notif_admin_id} was already modified.")
+                    else:
+                        logging.warning(f"Could not edit notification for admin {notif_admin_id}: {e}")
+                except Exception as e:
+                    logging.warning(f"Could not edit notification for admin {notif_admin_id}: {e}")
+
         await context.bot.send_message(
             chat_id=user_id, text="До вашого діалогу підключився менеджер. Будь ласка, очікуйте на відповідь."
         )
@@ -1701,8 +1771,6 @@ async def accept_chat_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.edit_message_text(
             text=f"⚠️ Диалог с пользователем {user_info.full_name} уже был взят в работу другим администратором.", reply_markup=None
         )
-
-
 async def clear_chat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Удаляет сессию живого чата для указанного пользователя."""
     if update.effective_user.id not in ADMIN_IDS:
@@ -1810,11 +1878,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Если сессии нет, создаем новую и уведомляем админов
             set_chat_status(user_id=user.id, status='waiting')
 
+            notification_messages = []
+
+            history_records = get_history_for_user(user.id, limit=5)
+            if history_records:
+                formatted_lines = []
+                for record in reversed(history_records):
+                    sender = 'Бот' if record['sender_type'] == 'bot' else 'Клиент'
+                    formatted_lines.append(f"<b>{sender}:</b> {record['message_text']}")
+                history_str = "\n".join(formatted_lines)
+            else:
+                history_str = "<i>(предыдущей истории нет)</i>"
+
             user_mention = user.mention_html()
             text_for_admin = (
-                f"🚨 Новый вопрос от пользователя {user_mention} (ID: <code>{user.id}</code>)\n\n"
-                f"<b>Текст вопроса:</b>\n"
-                f"{update.message.text}"
+                f"📜 <b>История диалога (последние 5):</b>\n{history_str}\n"
+                f"--------------------\n"
+                f"🚨 <b>Новый вопрос от {user_mention} (ID: <code>{user.id}</code>):</b>\n\n"
+                f"<b>{update.message.text}</b>"
             )
             keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("Взять в работу", callback_data=f"accept_chat_{user.id}")]
@@ -1822,9 +1903,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             for admin_id in ADMIN_IDS:
                 try:
-                    await context.bot.send_message(chat_id=admin_id, text=text_for_admin, reply_markup=keyboard, parse_mode='HTML')
+                    sent_message = await context.bot.send_message(chat_id=admin_id, text=text_for_admin, reply_markup=keyboard, parse_mode='HTML')
+                    notification_messages.append((admin_id, sent_message.message_id))
                 except Exception as e:
                     logging.warning(f"Не удалось отправить уведомление админу {admin_id}: {e}")
+            
+            if notification_messages:
+                context.bot_data[f"chat_notifications_{user.id}"] = notification_messages
 
 
 def main() -> None:
@@ -1925,6 +2010,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(accept_chat_callback, pattern='^accept_chat_'))
     application.add_handler(CommandHandler("testbutton", test_button))
     application.add_handler(CommandHandler('createbuttonpost', create_find_post))
+    application.add_handler(CallbackQueryHandler(contact_callback, pattern='^contact_'))
     application.add_handler(CallbackQueryHandler(delete_callback, pattern='^del_'))
     application.add_handler(CallbackQueryHandler(confirm_delete_callback, pattern='^confirm_del_'))
     application.add_handler(CallbackQueryHandler(cancel_delete_callback, pattern='^cancel_del$'))

@@ -3,7 +3,7 @@ import sqlite3
 
 def init_db():
     """
-    Инициализирует базу данных: подключается к shop.db и создает таблицу products.
+    Инициализирует базу данных: подключается к shoes_bot.db и создает все необходимые таблицы, если они не существуют.
     """
     conn = sqlite3.connect('shoes_bot.db')
     cursor = conn.cursor()
@@ -49,6 +49,35 @@ def init_db():
             message_text TEXT NOT NULL,
             sender_type TEXT NOT NULL,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS customers (
+            user_id INTEGER PRIMARY KEY,
+            full_name TEXT,
+            phone_number TEXT
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_user_id INTEGER,
+            delivery_address TEXT,
+            ttn TEXT,
+            status TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS order_items (
+            item_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER,
+            product_id INTEGER,
+            size TEXT,
+            price_at_purchase INTEGER
         )
     ''')
 
@@ -268,6 +297,50 @@ def get_chat_by_user_id(user_id: int):
     return chat_info
 
 
+def add_or_update_customer(user_id: int, full_name: str, phone_number: str):
+    """
+    Добавляет нового клиента или обновляет данные существующего.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR REPLACE INTO customers (user_id, full_name, phone_number) VALUES (?, ?, ?)",
+        (user_id, full_name, phone_number)
+    )
+    conn.commit()
+    conn.close()
+
+
+def create_order(customer_user_id: int, delivery_address: str, status: str) -> int:
+    """
+    Создает новую запись о заказе в таблице orders и возвращает ее ID.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO orders (customer_user_id, delivery_address, status) VALUES (?, ?, ?)",
+        (customer_user_id, delivery_address, status)
+    )
+    order_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return order_id
+
+
+def add_item_to_order(order_id: int, product_id: int, size: str, price_at_purchase: int):
+    """
+    Добавляет один товар в конкретный заказ в таблице order_items.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO order_items (order_id, product_id, size, price_at_purchase) VALUES (?, ?, ?, ?)",
+        (order_id, product_id, size, price_at_purchase)
+    )
+    conn.commit()
+    conn.close()
+
+
 def delete_chat(user_id: int):
     """
     Удаляет запись о чате по user_id.
@@ -321,3 +394,44 @@ def get_chat_by_admin_id(admin_id: int):
     chat_info = cursor.fetchone()
     conn.close()
     return chat_info
+
+
+def get_last_order_summary(user_id: int) -> dict | None:
+    """
+    Находит самый последний заказ для указанного user_id и возвращает
+    всю информацию о нем в виде словаря.
+    """
+    conn = sqlite3.connect('shoes_bot.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # 1. Найти последний заказ
+    cursor.execute(
+        "SELECT * FROM orders WHERE customer_user_id = ? ORDER BY created_at DESC LIMIT 1",
+        (user_id,)
+    )
+    last_order = cursor.fetchone()
+
+    if not last_order:
+        conn.close()
+        return None
+
+    order_id = last_order['order_id']
+
+    # 2. Получить данные клиента
+    cursor.execute("SELECT * FROM customers WHERE user_id = ?", (user_id,))
+    customer_details = cursor.fetchone()
+
+    # 3. Получить товары в заказе
+    cursor.execute("SELECT * FROM order_items WHERE order_id = ?", (order_id,))
+    order_items = cursor.fetchall()
+
+    conn.close()
+
+    summary = {
+        "order_details": dict(last_order) if last_order else {},
+        "customer_details": dict(customer_details) if customer_details else {},
+        "items": [dict(item) for item in order_items]
+    }
+
+    return summary
